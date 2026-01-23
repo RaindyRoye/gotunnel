@@ -193,9 +193,9 @@ func (a *Taa) VerifyCipherBlock(src []byte) bool {
 	return a.token.isComplementary(receivedToken)
 }
 
-// GetRc4key generates a key for RC4 encryption based on the current local token.
+// GetChacha20key generates a key for RC4 encryption based on the current local token.
 // It repeats the token's byte representation 8 times (resulting in 16 * 8 = 128 bytes).
 // Note: RC4 is cryptographically deprecated. This function is preserved as per API requirements.
-func (a *Taa) GetRc4key() []byte {
+func (a *Taa) GetChacha20key() []byte {
 	return bytes.Repeat(a.token.toBytes(), 8)
 }

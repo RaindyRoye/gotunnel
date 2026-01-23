@@ -173,7 +173,7 @@ func (cli *Client) createHub() (hub *HubItem, err error) {
 
 	// Authentication successful. Set up the encryption key for the tunnel session.
 	// Note: RC4 is cryptographically deprecated, but this is preserved as per API requirements.
-	tunnel.SetCipherKey(a.GetRc4key())
+	tunnel.SetCipherKey(a.GetChacha20key())
 
 	// Create the client hub for this authenticated tunnel connection.
 	hub = &HubItem{
