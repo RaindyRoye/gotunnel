@@ -4,6 +4,7 @@ package tunnel
 import (
 	"container/heap"
 	"errors"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -304,6 +305,23 @@ func (cli *Client) listen() error {
 	}
 }
 
+// backoff returns a duration for exponential backoff with jitter.
+// attempt is 0-based. The delay grows from baseDelay up to maxDelay,
+// with random jitter to prevent thundering herd.
+func backoff(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
+	delay := baseDelay
+	for i := 0; i < attempt; i++ {
+		delay *= 2
+		if delay >= maxDelay {
+			delay = maxDelay
+			break
+		}
+	}
+	// Add jitter: 50% ~ 100% of delay
+	jitter := time.Duration(rand.Int63n(int64(delay/2 + 1)))
+	return delay/2 + jitter
+}
+
 // Start initializes the client.
 // It spawns goroutines to maintain the desired number of tunnel connections
 // and starts the local listener to forward connections.
@@ -314,21 +332,25 @@ func (cli *Client) Start() error {
 		go func(index int) {
 			defer Recover() // Recover from panics in this maintenance goroutine
 
+			failures := 0 // consecutive failure count for backoff
 			for {
 				// Attempt to create a new tunnel connection
 				hub, err := cli.createHub()
 				if err != nil {
-					Error("client tunnel %d failed to connect or authenticate: %v", index, err)
-					time.Sleep(time.Second * 3) // Wait before retrying
-					continue                    // Retry the connection loop
+					failures++
+					wait := backoff(failures, 3*time.Second, 60*time.Second)
+					Error("client tunnel %d failed to connect or authenticate: %v (retry in %v)", index, err, wait)
+					time.Sleep(wait)
+					continue
 				}
 
+				failures = 0 // reset on successful connection
 				Info("client tunnel %d connected and authenticated successfully", index)
 				cli.addHub(hub) // Add the new hub to the managed queue
 				hub.Start()     // Start the hub's main loop (this blocks until the tunnel breaks)
 				cli.removeHub(hub) // Remove the hub from the queue when it stops/disconnects
-				Error("client tunnel %d disconnected", index)
-				// Loop continues, attempting to reconnect
+				Error("client tunnel %d disconnected, reconnecting in 1s", index)
+				time.Sleep(time.Second) // Brief delay before reconnect to avoid tight loop
 			}
 		}(i)
 	}

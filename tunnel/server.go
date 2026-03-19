@@ -3,6 +3,7 @@ package tunnel
 
 import (
 	"net"
+	"time"
 )
 
 // ServerHub extends Hub to manage links specifically for a tunnel server.
@@ -20,18 +21,18 @@ func (h *ServerHub) handleLink(l *link) {
 	// Ensure any panics in this goroutine are recovered and logged.
 	defer Recover()
 
-	// Establish a connection to the backend server.
-	conn, err := net.DialTCP("tcp", nil, h.baddr)
+	// Establish a connection to the backend server with a timeout.
+	conn, err := net.DialTimeout("tcp", h.baddr.String(), 10*time.Second)
 	if err != nil {
 		Error("link(%d) connect to backend %v failed: %v", l.id, h.baddr, err)
 		// Inform the client that the link creation failed.
 		h.SendCmd(l.id, LINK_CLOSE)
-		// Note: deleteLink is deferred, so it will run after this function ends.
 		return
 	}
 
+	tcpConn := conn.(*net.TCPConn)
 	// Successfully connected to the backend. Start the link's I/O routines.
-	h.startLink(l, conn)
+	h.startLink(l, tcpConn)
 }
 
 // onCtrl acts as a filter and dispatcher for control commands received by the server hub.
