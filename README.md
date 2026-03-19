@@ -14,9 +14,10 @@ to gain gotunnel's valuable features, such as secure and persistent.
 ## build
 
 ```bash
-go install github.com/xjdrew/gotunnel
+./build.sh
 ```
 
+在openwrt使用，见 [docs/build_openwrt](docs/build_openwrt/)
 
 ## Usage
 

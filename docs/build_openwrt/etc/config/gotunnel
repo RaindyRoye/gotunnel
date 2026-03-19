@@ -1,0 +1,8 @@
+config gotunnel 'main'
+        option enabled '1'
+        option tunnels '0'
+        option listen ':8001'
+        option backend '127.0.0.1:3128'
+        option secret 'your-secret'
+        option log '10'
+        # option user 'nobody'   
