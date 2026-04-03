@@ -19,8 +19,9 @@ type link struct {
 	conn *net.TCPConn
 	wbuf *Buffer // write buffer
 
-	lock sync.Mutex // protects below fields
-	rerr error      // if read closed, error to give reads
+	lock      sync.Mutex // protects below fields
+	rerr      error      // if read closed, error to give reads
+	closeOnce sync.Once
 }
 
 // set rerr
@@ -46,10 +47,19 @@ func (l *link) wclose() bool {
 	return l.wbuf.Close()
 }
 
+func (l *link) closeConn() {
+	l.closeOnce.Do(func() {
+		if l.conn != nil {
+			l.conn.Close()
+		}
+	})
+}
+
 // close link
 func (l *link) aclose() {
 	l.rclose()
 	l.wclose()
+	l.closeConn()
 }
 
 // read data from link
@@ -132,6 +142,7 @@ func (h *Hub) startLink(l *link, conn *net.TCPConn) {
 	conn.SetKeepAlive(true)
 	conn.SetKeepAlivePeriod(time.Second * 60)
 	l.setConn(conn)
+	defer l.closeConn()
 
 	Info("link(%d) start: %v", l.id, conn.RemoteAddr())
 	var wg sync.WaitGroup

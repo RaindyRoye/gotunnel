@@ -12,7 +12,7 @@ import (
 
 // ClientHub extends Hub to manage client-side links and implement heartbeat logic.
 type ClientHub struct {
-	*Hub      // Embedding Hub provides all its methods and fields
+	*Hub        // Embedding Hub provides all its methods and fields
 	sent uint16 // Counter for the last heartbeat ID sent
 	rcvd uint16 // Counter for the last heartbeat ID received from the server
 }
@@ -42,8 +42,8 @@ func (h *ClientHub) heartbeat() {
 		span := (h.sent + 1 - h.rcvd) & 0xFFFF // Bitwise AND masks to 16 bits effectively
 
 		if int(span) >= maxSpan {
-			Error("tunnel(%v) heartbeat timeout. Sent: %d, Last Received Ack: %d, Calculated Span: %d", 
-			      h.Hub.tunnel, h.sent, h.rcvd, span)
+			Error("tunnel(%v) heartbeat timeout. Sent: %d, Last Received Ack: %d, Calculated Span: %d",
+				h.Hub.tunnel, h.sent, h.rcvd, span)
 			h.Hub.Close() // Close the tunnel connection if timeout occurs
 			break         // Exit the heartbeat loop
 		}
@@ -85,9 +85,9 @@ func newClientHub(tunnel *Tunnel) *ClientHub {
 
 // HubItem represents a single tunnel connection managed by the client.
 type HubItem struct {
-	*ClientHub        // Embedding ClientHub provides access to its methods and fields
-	priority int       // Priority for the heap (lower is higher priority)
-	index    int       // Index in the heap (required by container/heap)
+	*ClientHub     // Embedding ClientHub provides access to its methods and fields
+	priority   int // Priority for the heap (lower is higher priority)
+	index      int // Index in the heap (required by container/heap)
 }
 
 // HubQueue implements container/heap.Interface for HubItem.
@@ -123,10 +123,10 @@ func (hq *HubQueue) Pop() interface{} {
 
 // Client manages multiple tunnel connections and listens for local connections to forward.
 type Client struct {
-	laddr   string  // Local address to listen for incoming connections
-	backend string  // Remote address of the tunnel server
-	secret  string  // Shared secret for authentication
-	tunnels uint    // Number of concurrent tunnel connections to maintain
+	laddr   string // Local address to listen for incoming connections
+	backend string // Remote address of the tunnel server
+	secret  string // Shared secret for authentication
+	tunnels uint   // Number of concurrent tunnel connections to maintain
 
 	alloc *IdAllocator // Allocator for unique link IDs
 	cq    HubQueue     // Concurrent queue (min-heap) of active hubs
@@ -193,7 +193,9 @@ func (cli *Client) addHub(item *HubItem) {
 // removeHub removes a HubItem from the client's managed queue.
 func (cli *Client) removeHub(item *HubItem) {
 	cli.lock.Lock()
-	heap.Remove(&cli.cq, item.index) // Remove by index
+	if item.index >= 0 && item.index < len(cli.cq) && cli.cq[item.index] == item {
+		heap.Remove(&cli.cq, item.index) // Remove by index
+	}
 	cli.lock.Unlock()
 }
 
@@ -207,8 +209,8 @@ func (cli *Client) fetchHub() *HubItem {
 		return nil // No hubs available
 	}
 
-	item := cli.cq[0] // Get the root (highest priority) item
-	item.priority++   // Increase its priority (make it less preferred next time)
+	item := cli.cq[0]    // Get the root (highest priority) item
+	item.priority++      // Increase its priority (make it less preferred next time)
 	heap.Fix(&cli.cq, 0) // Restore the heap property after priority change
 	return item
 }
@@ -217,8 +219,10 @@ func (cli *Client) fetchHub() *HubItem {
 // This is used when a connection attempt using the hub fails.
 func (cli *Client) dropHub(item *HubItem) {
 	cli.lock.Lock()
-	item.priority--            // Decrease its priority (make it more preferred)
-	heap.Fix(&cli.cq, item.index) // Restore the heap property after priority change
+	if item.index >= 0 && item.index < len(cli.cq) && cli.cq[item.index] == item {
+		item.priority--               // Decrease its priority (make it more preferred)
+		heap.Fix(&cli.cq, item.index) // Restore the heap property after priority change
+	}
 	cli.lock.Unlock()
 }
 
@@ -346,8 +350,8 @@ func (cli *Client) Start() error {
 
 				failures = 0 // reset on successful connection
 				Info("client tunnel %d connected and authenticated successfully", index)
-				cli.addHub(hub) // Add the new hub to the managed queue
-				hub.Start()     // Start the hub's main loop (this blocks until the tunnel breaks)
+				cli.addHub(hub)    // Add the new hub to the managed queue
+				hub.Start()        // Start the hub's main loop (this blocks until the tunnel breaks)
 				cli.removeHub(hub) // Remove the hub from the queue when it stops/disconnects
 				Error("client tunnel %d disconnected, reconnecting in 1s", index)
 				time.Sleep(time.Second) // Brief delay before reconnect to avoid tight loop
@@ -381,7 +385,7 @@ func NewClient(listen, backend, secret string, tunnels uint) (*Client, error) {
 		secret:  secret,
 		tunnels: tunnels,
 
-		alloc: newAllocator(),                   // Initialize the ID allocator
+		alloc: newAllocator(),                      // Initialize the ID allocator
 		cq:    make(HubQueue, tunnels)[:0:tunnels], // Initialize the hub queue slice with correct capacity and length
 	}
 	// Initialize the heap structure on the slice
