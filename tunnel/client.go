@@ -24,8 +24,6 @@ func (h *ClientHub) heartbeat() {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
-	// Calculate the maximum allowed span between sent and received heartbeats.
-	// This determines how many heartbeats can be missed before the tunnel is considered dead.
 	timeoutDuration := getTimeout()
 	maxSpan := int(timeoutDuration / heartbeatInterval)
 	if maxSpan <= tunnelMinSpan {
@@ -34,24 +32,17 @@ func (h *ClientHub) heartbeat() {
 	Debug("ClientHub heartbeat maxSpan: %d (interval: %v, timeout: %v)", maxSpan, heartbeatInterval, timeoutDuration)
 
 	for range ticker.C {
-		// Calculate the current span (number of heartbeats sent since last received ack).
-		// Handle potential uint16 wraparound (0xFFFF -> 0).
-		// Formula: (sent + 1) - rcvd, accounting for wraparound.
-		// Example: sent=65535, rcvd=65533 => span = (65535 - 65533) + 1 = 3.
-		// Example: sent=2, rcvd=65535 => span = (2 + 65536 - 65535) + 1 = 4.
-		span := (h.sent + 1 - h.rcvd) & 0xFFFF // Bitwise AND masks to 16 bits effectively
+		span := (h.sent + 1 - h.rcvd) & 0xFFFF
 
 		if int(span) >= maxSpan {
 			Error("tunnel(%v) heartbeat timeout. Sent: %d, Last Received Ack: %d, Calculated Span: %d",
 				h.Hub.tunnel, h.sent, h.rcvd, span)
-			h.Hub.Close() // Close the tunnel connection if timeout occurs
-			break         // Exit the heartbeat loop
+			h.Hub.Close()
+			break
 		}
 
 		h.sent++
 		if !h.SendCmd(h.sent, TUN_HEARTBEAT) {
-			// If sending the heartbeat fails, the tunnel is likely broken.
-			// Break the loop to stop the heartbeat goroutine.
 			Debug("ClientHub failed to send heartbeat %d, stopping.", h.sent)
 			break
 		}
@@ -59,64 +50,54 @@ func (h *ClientHub) heartbeat() {
 }
 
 // onCtrl acts as a filter for control commands received by the client hub.
-// It handles TUN_HEARTBEAT by updating the received counter.
 func (h *ClientHub) onCtrl(cmd Cmd) bool {
 	if cmd.Cmd == TUN_HEARTBEAT {
-		// Update the last received heartbeat ID
 		h.rcvd = cmd.Id
-		return true // Command handled, don't pass to base Hub
+		return true
 	}
-	// Pass other commands to the base Hub logic
 	return false
 }
 
 // newClientHub creates and starts a new ClientHub instance.
-// It initializes the base Hub and starts the heartbeat goroutine.
 func newClientHub(tunnel *Tunnel) *ClientHub {
 	h := &ClientHub{
-		Hub:  newHub(tunnel), // Initialize the embedded Hub
-		sent: 0,              // Initialize counters
+		Hub:  newHub(tunnel),
+		sent: 0,
 		rcvd: 0,
 	}
-	h.Hub.onCtrlFilter = h.onCtrl // Set the control filter
-	go h.heartbeat()              // Start the heartbeat loop in the background
+	h.Hub.onCtrlFilter = h.onCtrl
+	go h.heartbeat()
 	return h
 }
 
 // HubItem represents a single tunnel connection managed by the client.
 type HubItem struct {
-	*ClientHub     // Embedding ClientHub provides access to its methods and fields
-	priority   int // Priority for the heap (lower is higher priority)
-	index      int // Index in the heap (required by container/heap)
+	*ClientHub
+	priority int
+	index    int
 }
 
 // HubQueue implements container/heap.Interface for HubItem.
 type HubQueue []*HubItem
 
 func (hq HubQueue) Len() int { return len(hq) }
-
-// Less defines the min-heap property based on priority (lower number is higher priority).
 func (hq HubQueue) Less(i, j int) bool { return hq[i].priority < hq[j].priority }
-
 func (hq HubQueue) Swap(i, j int) {
 	hq[i], hq[j] = hq[j], hq[i]
 	hq[i].index = i
 	hq[j].index = j
 }
-
-func (hq *HubQueue) Push(x interface{}) {
-	n := len(*hq)
+func (hq *HubQueue) Push(x any) {
 	item := x.(*HubItem)
-	item.index = n
+	item.index = len(*hq)
 	*hq = append(*hq, item)
 }
-
-func (hq *HubQueue) Pop() interface{} {
+func (hq *HubQueue) Pop() any {
 	old := *hq
 	n := len(old)
 	item := old[n-1]
-	old[n-1] = nil  // Avoid memory leak
-	item.index = -1 // for safety
+	old[n-1] = nil
+	item.index = -1
 	*hq = old[0 : n-1]
 	return item
 }
@@ -251,60 +232,37 @@ func (cli *Client) handleConn(hub *HubItem, conn *net.TCPConn) {
 	h.startLink(l, conn)
 }
 
-// listen starts the local TCP server to accept incoming connections.
-// It fetches a hub for each connection and starts forwarding.
 func (cli *Client) listen() error {
-	// Listen on the local address
 	ln, err := net.Listen("tcp", cli.laddr)
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
 
-	// Cast to TCPListener to get access to specific TCP methods if needed (though AcceptTCP is already available via net.Listener).
-	// Using the generic net.Listener interface is generally preferred for flexibility.
-	tcpListener, ok := ln.(*net.TCPListener)
-	if !ok {
-		// If the listener is not a *TCPListener, we cannot call specific TCP methods on it.
-		// This should not happen with net.Listen("tcp", ...), but handle generically.
-		// We can still call Accept() which returns net.Conn.
-		// For this specific code, AcceptTCP is called anyway, which is fine as *TCPConn implements net.Conn.
-		// Proceed with the original logic assuming ln is effectively a TCPListener.
-		// The original code was: tcpListener := ln.(*net.TCPListener)
-		// Let's keep the cast but add a comment.
-		tcpListener = ln.(*net.TCPListener) // Safe cast for net.Listen("tcp", ...)
-	}
+	tcpListener := ln.(*net.TCPListener)
 
 	for {
 		conn, err := tcpListener.AcceptTCP()
 		if err != nil {
-			// Check if the error is temporary (e.g., too many open files).
-			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				// Log the temporary failure and continue trying to accept.
-				Log("client listen accept failed temporarily on %v: %s", ln.Addr(), netErr.Error())
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				Log("client listen accept timeout on %v: %s", ln.Addr(), netErr.Error())
 				continue
-			} else {
-				// A permanent error occurred (e.g., listener closed, network down).
-				// Return the error to signal the listener loop should stop.
-				return err
 			}
+			return err
 		}
 
 		Info("client accepted new local connection from %v", conn.RemoteAddr())
 
-		// Fetch an available hub from the client's queue.
 		hub := cli.fetchHub()
 		if hub == nil {
 			Error("client has no active hubs available, dropping local connection from %v", conn.RemoteAddr())
-			conn.Close() // Close the local connection if no tunnel is available
+			conn.Close()
 			continue
 		}
 
-		// Configure keep-alive for the local connection.
 		conn.SetKeepAlive(true)
 		conn.SetKeepAlivePeriod(time.Second * 60)
 
-		// Start handling the connection in a new goroutine.
 		go cli.handleConn(hub, conn)
 	}
 }

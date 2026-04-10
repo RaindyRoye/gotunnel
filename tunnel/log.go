@@ -6,6 +6,7 @@
 package tunnel
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -15,7 +16,6 @@ import (
 var logger *log.Logger
 
 func init() {
-	//logger = log.New(io.Writer(os.Stderr), "", log.Ldate | log.Lmicroseconds | log.Lshortfile)
 	logger = log.New(io.Writer(os.Stderr), "", log.Ldate|log.Lmicroseconds)
 }
 
@@ -53,7 +53,6 @@ func Log(format string, a ...interface{}) {
 
 func LogStack(format string, a ...interface{}) {
 	_print(format, a...)
-
 	buf := make([]byte, 32768)
 	runtime.Stack(buf, true)
 	_print("!!!!!stack!!!!!: %s", buf)
@@ -68,5 +67,5 @@ func LogCurStack(format string, a ...interface{}) {
 
 func Panic(format string, a ...interface{}) {
 	LogStack(format, a...)
-	panic("!!")
+	panic(fmt.Sprintf("!! %s", fmt.Sprintf(format, a...)))
 }

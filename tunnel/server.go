@@ -135,21 +135,15 @@ func (s *Server) Start() error {
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
-			// Check if the error is temporary (e.g., too many open files).
-			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				// Log the temporary failure and continue trying to accept.
-				Log("accept failed temporarily on %v: %s", s.ln.Addr(), netErr.Error())
+			// Check if the listener was closed
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				Log("accept timeout on %v: %s", s.ln.Addr(), netErr.Error())
 				continue
-			} else {
-				// A permanent error occurred (e.g., listener closed, network down).
-				// Return the error to signal the server should stop.
-				return err
 			}
+			return err
 		}
 
-		// Successfully accepted a new connection.
 		Log("new tunnel connection accepted from %v", conn.RemoteAddr())
-		// Spawn a new goroutine to handle this connection concurrently.
 		go s.handleConn(conn)
 	}
 }
