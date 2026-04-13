@@ -19,10 +19,35 @@ var errTooLarge = fmt.Errorf("tunnel.Read: packet too large")
 
 type TunnelConn struct {
 	net.Conn
-	reader *bufio.Reader
-	writer *bufio.Writer
-	enc    *chacha20.Cipher
-	dec    *chacha20.Cipher
+	reader   *bufio.Reader
+	writer   *bufio.Writer
+	enc      *chacha20.Cipher
+	dec      *chacha20.Cipher
+	encKey   []byte   // store key for per-packet cipher creation
+	encNonce [24]byte // incrementing nonce for encryption
+	decNonce [24]byte // incrementing nonce for decryption
+}
+
+func (conn *TunnelConn) nextEncNonce() [24]byte {
+	nonce := conn.encNonce
+	for i := 23; i >= 0; i-- {
+		conn.encNonce[i]++
+		if conn.encNonce[i] != 0 {
+			break
+		}
+	}
+	return nonce
+}
+
+func (conn *TunnelConn) nextDecNonce() [24]byte {
+	nonce := conn.decNonce
+	for i := 23; i >= 0; i-- {
+		conn.decNonce[i]++
+		if conn.decNonce[i] != 0 {
+			break
+		}
+	}
+	return nonce
 }
 
 func (conn *TunnelConn) SetCipherKey(key []byte) {
@@ -39,26 +64,46 @@ func (conn *TunnelConn) SetCipherKey(key []byte) {
 		key = key[:32] // 截断长密钥
 	}
 
-	// 使用固定 nonce（隧道场景适用）
-	var nonce [24]byte // ChaCha20 需要 24 字节 nonce
-	// 注意：实际生产环境应使用随机 nonce + 传输 nonce
-	// 但 gotunnel 是点对点隧道，固定 nonce 可接受
+	// 保存密钥用于 per-packet cipher 创建
+	conn.encKey = key
 
-	conn.enc, _ = chacha20.NewUnauthenticatedCipher(key, nonce[:])
-	conn.dec, _ = chacha20.NewUnauthenticatedCipher(key, nonce[:])
+	// 初始化 cipher（初始 nonce 全零，后续递增）
+	var nonce [24]byte
+	enc, err := chacha20.NewUnauthenticatedCipher(key, nonce[:])
+	if err != nil {
+		Log("failed to create ChaCha20 encryptor: %v", err)
+	}
+	conn.enc = enc
+	dec, err := chacha20.NewUnauthenticatedCipher(key, nonce[:])
+	if err != nil {
+		Log("failed to create ChaCha20 decryptor: %v", err)
+	}
+	conn.dec = dec
 }
 
 func (conn *TunnelConn) Read(b []byte) (int, error) {
 	n, err := conn.reader.Read(b)
 	if n > 0 && conn.dec != nil {
-		conn.dec.XORKeyStream(b[:n], b[:n])
+		nonce := conn.nextDecNonce()
+		dec, err := chacha20.NewUnauthenticatedCipher(conn.encKey, nonce[:])
+		if err == nil {
+			dec.XORKeyStream(b[:n], b[:n])
+		} else {
+			Log("failed to create ChaCha20 decryptor: %v", err)
+		}
 	}
 	return n, err
 }
 
 func (conn *TunnelConn) Write(b []byte) (int, error) {
 	if conn.enc != nil {
-		conn.enc.XORKeyStream(b, b)
+		nonce := conn.nextEncNonce()
+		enc, err := chacha20.NewUnauthenticatedCipher(conn.encKey, nonce[:])
+		if err == nil {
+			enc.XORKeyStream(b, b)
+		} else {
+			Log("failed to create ChaCha20 encryptor: %v", err)
+		}
 	}
 	return conn.writer.Write(b)
 }
@@ -140,6 +185,10 @@ func (tun *Tunnel) String() string {
 
 func newTunnel(conn net.Conn) *Tunnel {
 	var tun Tunnel
-	tun.TunnelConn = &TunnelConn{conn, bufio.NewReaderSize(conn, TunnelPacketSize*2), bufio.NewWriterSize(conn, TunnelPacketSize*2), nil, nil}
+	tun.TunnelConn = &TunnelConn{
+		Conn:   conn,
+		reader: bufio.NewReaderSize(conn, TunnelPacketSize*2),
+		writer: bufio.NewWriterSize(conn, TunnelPacketSize*2),
+	}
 	return &tun
 }

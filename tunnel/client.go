@@ -3,8 +3,10 @@ package tunnel
 
 import (
 	"container/heap"
+	"context"
+	"crypto/rand"
 	"errors"
-	"math/rand"
+	"math/big"
 	"net"
 	"sync"
 	"time"
@@ -12,7 +14,8 @@ import (
 
 // ClientHub extends Hub to manage client-side links and implement heartbeat logic.
 type ClientHub struct {
-	*Hub        // Embedding Hub provides all its methods and fields
+	*Hub // Embedding Hub provides all its methods and fields
+	ctx  context.Context
 	sent uint16 // Counter for the last heartbeat ID sent
 	rcvd uint16 // Counter for the last heartbeat ID received from the server
 }
@@ -31,20 +34,26 @@ func (h *ClientHub) heartbeat() {
 	}
 	Debug("ClientHub heartbeat maxSpan: %d (interval: %v, timeout: %v)", maxSpan, heartbeatInterval, timeoutDuration)
 
-	for range ticker.C {
-		span := (h.sent + 1 - h.rcvd) & 0xFFFF
+	for {
+		select {
+		case <-h.ctx.Done():
+			Debug("ClientHub heartbeat stopped: %v", h.ctx.Err())
+			return
+		case <-ticker.C:
+			span := (h.sent + 1 - h.rcvd) & 0xFFFF
 
-		if int(span) >= maxSpan {
-			Error("tunnel(%v) heartbeat timeout. Sent: %d, Last Received Ack: %d, Calculated Span: %d",
-				h.Hub.tunnel, h.sent, h.rcvd, span)
-			h.Hub.Close()
-			break
-		}
+			if int(span) >= maxSpan {
+				Error("tunnel(%v) heartbeat timeout. Sent: %d, Last Received Ack: %d, Calculated Span: %d",
+					h.Hub.tunnel, h.sent, h.rcvd, span)
+				h.Hub.Close()
+				return
+			}
 
-		h.sent++
-		if !h.SendCmd(h.sent, TUN_HEARTBEAT) {
-			Debug("ClientHub failed to send heartbeat %d, stopping.", h.sent)
-			break
+			h.sent++
+			if !h.SendCmd(h.sent, TUN_HEARTBEAT) {
+				Debug("ClientHub failed to send heartbeat %d, stopping.", h.sent)
+				return
+			}
 		}
 	}
 }
@@ -59,9 +68,10 @@ func (h *ClientHub) onCtrl(cmd Cmd) bool {
 }
 
 // newClientHub creates and starts a new ClientHub instance.
-func newClientHub(tunnel *Tunnel) *ClientHub {
+func newClientHub(ctx context.Context, tunnel *Tunnel) *ClientHub {
 	h := &ClientHub{
 		Hub:  newHub(tunnel),
+		ctx:  ctx,
 		sent: 0,
 		rcvd: 0,
 	}
@@ -80,7 +90,7 @@ type HubItem struct {
 // HubQueue implements container/heap.Interface for HubItem.
 type HubQueue []*HubItem
 
-func (hq HubQueue) Len() int { return len(hq) }
+func (hq HubQueue) Len() int           { return len(hq) }
 func (hq HubQueue) Less(i, j int) bool { return hq[i].priority < hq[j].priority }
 func (hq HubQueue) Swap(i, j int) {
 	hq[i], hq[j] = hq[j], hq[i]
@@ -104,6 +114,8 @@ func (hq *HubQueue) Pop() any {
 
 // Client manages multiple tunnel connections and listens for local connections to forward.
 type Client struct {
+	ctx     context.Context // context for graceful shutdown
+	cancel  context.CancelFunc
 	laddr   string // Local address to listen for incoming connections
 	backend string // Remote address of the tunnel server
 	secret  string // Shared secret for authentication
@@ -116,7 +128,14 @@ type Client struct {
 
 // createHub establishes a new tunnel connection to the backend server.
 // It performs the authentication handshake and returns a new HubItem.
-func (cli *Client) createHub() (hub *HubItem, err error) {
+func (cli *Client) createHub(ctx context.Context) (hub *HubItem, err error) {
+	// Check context before dialing
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	// Dial the backend server
 	conn, err := dial(cli.backend)
 	if err != nil {
@@ -154,12 +173,11 @@ func (cli *Client) createHub() (hub *HubItem, err error) {
 	}
 
 	// Authentication successful. Set up the encryption key for the tunnel session.
-	// Note: RC4 is cryptographically deprecated, but this is preserved as per API requirements.
 	tunnel.SetCipherKey(a.GetChacha20key())
 
 	// Create the client hub for this authenticated tunnel connection.
 	hub = &HubItem{
-		ClientHub: newClientHub(tunnel),
+		ClientHub: newClientHub(ctx, tunnel),
 	}
 	return hub, nil
 }
@@ -244,6 +262,14 @@ func (cli *Client) listen() error {
 	for {
 		conn, err := tcpListener.AcceptTCP()
 		if err != nil {
+			// Check context cancellation
+			select {
+			case <-cli.ctx.Done():
+				Log("client listener shutting down: %v", cli.ctx.Err())
+				return nil
+			default:
+			}
+
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				Log("client listen accept timeout on %v: %s", ln.Addr(), netErr.Error())
 				continue
@@ -267,10 +293,10 @@ func (cli *Client) listen() error {
 	}
 }
 
-// backoff returns a duration for exponential backoff with jitter.
+// secureBackoff returns a duration for exponential backoff with cryptographically secure jitter.
 // attempt is 0-based. The delay grows from baseDelay up to maxDelay,
 // with random jitter to prevent thundering herd.
-func backoff(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
+func secureBackoff(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
 	delay := baseDelay
 	for i := 0; i < attempt; i++ {
 		delay *= 2
@@ -279,9 +305,15 @@ func backoff(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
 			break
 		}
 	}
-	// Add jitter: 50% ~ 100% of delay
-	jitter := time.Duration(rand.Int63n(int64(delay/2 + 1)))
-	return delay/2 + jitter
+	// Add jitter: 50% ~ 100% of delay using crypto/rand
+	halfDelay := delay / 2
+	if halfDelay > 0 {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(halfDelay)))
+		if err == nil {
+			return halfDelay + time.Duration(n.Int64())
+		}
+	}
+	return delay
 }
 
 // Start initializes the client.
@@ -296,13 +328,31 @@ func (cli *Client) Start() error {
 
 			failures := 0 // consecutive failure count for backoff
 			for {
+				// Check context before attempting to connect
+				select {
+				case <-cli.ctx.Done():
+					Log("client tunnel %d shutting down: %v", index, cli.ctx.Err())
+					return
+				default:
+				}
+
 				// Attempt to create a new tunnel connection
-				hub, err := cli.createHub()
+				hub, err := cli.createHub(cli.ctx)
 				if err != nil {
+					// If context was cancelled, don't retry
+					if cli.ctx.Err() != nil {
+						return
+					}
 					failures++
-					wait := backoff(failures, 3*time.Second, 60*time.Second)
+					wait := secureBackoff(failures, 3*time.Second, 60*time.Second)
 					Error("client tunnel %d failed to connect or authenticate: %v (retry in %v)", index, err, wait)
-					time.Sleep(wait)
+
+					// Wait with context awareness
+					select {
+					case <-cli.ctx.Done():
+						return
+					case <-time.After(wait):
+					}
 					continue
 				}
 
@@ -311,14 +361,27 @@ func (cli *Client) Start() error {
 				cli.addHub(hub)    // Add the new hub to the managed queue
 				hub.Start()        // Start the hub's main loop (this blocks until the tunnel breaks)
 				cli.removeHub(hub) // Remove the hub from the queue when it stops/disconnects
-				Error("client tunnel %d disconnected, reconnecting in 1s", index)
-				time.Sleep(time.Second) // Brief delay before reconnect to avoid tight loop
+
+				// Check context before reconnecting
+				select {
+				case <-cli.ctx.Done():
+					return
+				case <-time.After(time.Second): // Brief delay before reconnect to avoid tight loop
+				}
+				Error("client tunnel %d disconnected, reconnecting", index)
 			}
 		}(i)
 	}
 
 	// Start the local listener loop. This call blocks.
 	return cli.listen()
+}
+
+// Close gracefully shuts down the client.
+func (cli *Client) Close() {
+	if cli.cancel != nil {
+		cli.cancel()
+	}
 }
 
 // Status prints the current status of all managed hubs.
@@ -337,7 +400,11 @@ func (cli *Client) Status() {
 // NewClient creates a new tunnel client instance.
 // It initializes the client structure and prepares the hub queue.
 func NewClient(listen, backend, secret string, tunnels uint) (*Client, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	client := &Client{
+		ctx:     ctx,
+		cancel:  cancel,
 		laddr:   listen,
 		backend: backend,
 		secret:  secret,
