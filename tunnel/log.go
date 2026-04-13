@@ -24,25 +24,25 @@ func _print(format string, a ...interface{}) {
 }
 
 func Trace(format string, a ...interface{}) {
-	if getLogLevel() > 3 {
+	if LogLevel > 3 {
 		_print(format, a...)
 	}
 }
 
 func Debug(format string, a ...interface{}) {
-	if getLogLevel() > 2 {
+	if LogLevel > 2 {
 		_print(format, a...)
 	}
 }
 
 func Info(format string, a ...interface{}) {
-	if getLogLevel() > 1 {
+	if LogLevel > 1 {
 		_print(format, a...)
 	}
 }
 
 func Error(format string, a ...interface{}) {
-	if getLogLevel() > 0 {
+	if LogLevel > 0 {
 		_print(format, a...)
 	}
 }

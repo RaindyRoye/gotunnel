@@ -22,7 +22,10 @@ func consume(buffer *Buffer) bool {
 			break
 		}
 	}
-	return input == output
+	if input != output {
+		return false
+	}
+	return true
 }
 
 func TestBuffer(t *testing.T) {

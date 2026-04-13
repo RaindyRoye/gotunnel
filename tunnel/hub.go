@@ -104,6 +104,7 @@ func (h *Hub) onData(id uint16, data []byte) {
 		Error("link(%d) put data failed", id)
 		return
 	}
+	return
 }
 
 func (h *Hub) Start() {
@@ -127,8 +128,7 @@ func (h *Hub) Start() {
 			}
 			h.onCtrl(cmd)
 		} else {
-			// 并发派发数据到对应的 link，Buffer 保证同一 link 内的顺序
-			go h.onData(id, data)
+			h.onData(id, data)
 		}
 	}
 

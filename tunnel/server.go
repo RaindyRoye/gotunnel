@@ -2,7 +2,6 @@
 package tunnel
 
 import (
-	"context"
 	"net"
 	"time"
 )
@@ -10,26 +9,17 @@ import (
 // ServerHub extends Hub to manage links specifically for a tunnel server.
 // It handles incoming link requests and connects them to a backend server.
 type ServerHub struct {
-	*Hub                  // Embedding Hub provides all its methods and fields
-	bctx  context.Context // context for graceful shutdown
-	baddr *net.TCPAddr    // Address of the backend server to which links are forwarded
+	*Hub      // Embedding Hub provides all its methods and fields
+	baddr *net.TCPAddr // Address of the backend server to which links are forwarded
 }
 
 // handleLink manages the lifecycle of a single tunnel link on the server side.
 // It dials the backend, then starts the bidirectional data transfer.
-func (h *ServerHub) handleLink(ctx context.Context, l *link) {
+func (h *ServerHub) handleLink(l *link) {
 	// Ensure the link is cleaned up from the hub's management upon function exit.
 	defer h.deleteLink(l.id)
 	// Ensure any panics in this goroutine are recovered and logged.
 	defer Recover()
-
-	// Respect context cancellation
-	select {
-	case <-ctx.Done():
-		Info("link(%d) cancelled by context", l.id)
-		return
-	default:
-	}
 
 	// Establish a connection to the backend server with a timeout.
 	conn, err := net.DialTimeout("tcp", h.baddr.String(), 10*time.Second)
@@ -56,7 +46,7 @@ func (h *ServerHub) onCtrl(cmd Cmd) bool {
 		l := h.createLink(id)
 		if l != nil {
 			// Successfully created link. Spawn a goroutine to handle its backend connection.
-			go h.handleLink(h.bctx, l)
+			go h.handleLink(l)
 		} else {
 			// Link creation failed (e.g., ID collision). Tell the client to close.
 			h.SendCmd(id, LINK_CLOSE)
@@ -73,11 +63,10 @@ func (h *ServerHub) onCtrl(cmd Cmd) bool {
 
 // newServerHub creates a new ServerHub instance.
 // It initializes the underlying Hub and sets up the control command filter.
-func newServerHub(ctx context.Context, tunnel *Tunnel, baddr *net.TCPAddr) *ServerHub {
+func newServerHub(tunnel *Tunnel, baddr *net.TCPAddr) *ServerHub {
 	h := &ServerHub{
 		Hub:   newHub(tunnel), // Initialize the embedded Hub
-		bctx:  ctx,
-		baddr: baddr, // Store the backend address
+		baddr: baddr,          // Store the backend address
 	}
 	// Assign the custom control filter to handle server-specific commands.
 	h.Hub.onCtrlFilter = h.onCtrl
@@ -86,8 +75,6 @@ func newServerHub(ctx context.Context, tunnel *Tunnel, baddr *net.TCPAddr) *Serv
 
 // Server represents the tunnel server itself, managing incoming connections.
 type Server struct {
-	ctx    context.Context // context for graceful shutdown
-	cancel context.CancelFunc
 	ln     net.Listener // Listener for incoming tunnel connections
 	baddr  *net.TCPAddr // Backend server address
 	secret string       // Shared secret for authentication
@@ -95,18 +82,11 @@ type Server struct {
 
 // handleConn manages the lifecycle of a single incoming tunnel connection.
 // It performs authentication and then starts the hub for that connection.
-func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
+func (s *Server) handleConn(conn net.Conn) {
 	// Always close the connection when this function exits.
 	defer conn.Close()
 	// Recover from panics in this connection's goroutine.
 	defer Recover()
-
-	// Check context before processing
-	select {
-	case <-ctx.Done():
-		return
-	default:
-	}
 
 	// Wrap the raw connection with tunnel logic.
 	tunnel := newTunnel(conn)
@@ -137,30 +117,24 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 
 	// Authentication successful. Set up the encryption key for the tunnel session.
+	// Note: RC4 is cryptographically deprecated, but this is preserved as per API requirements.
 	tunnel.SetCipherKey(a.GetChacha20key())
 
 	// Create the server hub for this authenticated tunnel connection.
-	h := newServerHub(ctx, tunnel, s.baddr)
+	h := newServerHub(tunnel, s.baddr)
 	// Start the hub's main loop to handle multiplexed links over this connection.
 	h.Start()
 }
 
 // Start begins listening for incoming connections and spawns a handler goroutine for each.
-// It blocks until the context is cancelled or an error occurs that prevents accepting new connections.
+// It blocks until an error occurs that prevents accepting new connections.
 func (s *Server) Start() error {
+	// Close the listener when the server stops.
 	defer s.ln.Close()
 
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
-			// Check if context was cancelled
-			select {
-			case <-s.ctx.Done():
-				Log("server shutting down: %v", s.ctx.Err())
-				return nil
-			default:
-			}
-
 			// Check if the listener was closed
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				Log("accept timeout on %v: %s", s.ln.Addr(), netErr.Error())
@@ -170,16 +144,8 @@ func (s *Server) Start() error {
 		}
 
 		Log("new tunnel connection accepted from %v", conn.RemoteAddr())
-		go s.handleConn(s.ctx, conn)
+		go s.handleConn(conn)
 	}
-}
-
-// Close gracefully shuts down the server.
-func (s *Server) Close() {
-	if s.cancel != nil {
-		s.cancel()
-	}
-	s.ln.Close()
 }
 
 // Status prints the current status of the server.
@@ -191,12 +157,9 @@ func (s *Server) Status() {
 // NewServer creates a new tunnel server instance.
 // It resolves the listen and backend addresses and prepares the server.
 func NewServer(listen, backend, secret string) (*Server, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-
 	// Create a listener socket bound to the listen address.
 	ln, err := newListener(listen)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
 
@@ -205,14 +168,11 @@ func NewServer(listen, backend, secret string) (*Server, error) {
 	if err != nil {
 		// Close the listener if backend resolution fails.
 		ln.Close()
-		cancel()
 		return nil, err
 	}
 
 	// Create and populate the Server struct.
 	s := &Server{
-		ctx:    ctx,
-		cancel: cancel,
 		ln:     ln,
 		baddr:  baddr,
 		secret: secret,

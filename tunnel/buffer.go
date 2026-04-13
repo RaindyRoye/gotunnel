@@ -8,11 +8,11 @@ import (
 // Buffer is a thread-safe circular buffer for storing byte slices ([]byte).
 // It uses sync.Cond for efficient waiting when the buffer is empty or full.
 type Buffer struct {
-	start  int        // Index of the first element in the buffer
-	end    int        // Index where the next element will be placed
-	buf    [][]byte   // The underlying slice acting as the circular buffer
+	start  int       // Index of the first element in the buffer
+	end    int       // Index where the next element will be placed
+	buf    [][]byte  // The underlying slice acting as the circular buffer
 	cond   *sync.Cond // Condition variable for blocking Pop on empty and signaling on Put
-	closed bool       // Flag indicating if the buffer is closed
+	closed bool      // Flag indicating if the buffer is closed
 }
 
 // bufferLen calculates the current number of elements in the buffer.
@@ -86,8 +86,8 @@ func (b *Buffer) Put(data []byte) bool {
 			} else { // b.end < b.start (wrap-around case)
 				// ... [start ... N) [0 ... end) ... -> ... [0 ... part1) [part1 ... part1+part2) ...
 				part1Len := oldCap - b.start
-				copy(newBuf, b.buf[b.start:oldCap])     // Copy from start to end of old buffer
-				copy(newBuf[part1Len:], b.buf[0:b.end]) // Copy from start of old buffer to end
+				copy(newBuf, b.buf[b.start:oldCap])           // Copy from start to end of old buffer
+				copy(newBuf[part1Len:], b.buf[0:b.end])       // Copy from start of old buffer to end
 			}
 		}
 

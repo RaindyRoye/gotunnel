@@ -17,15 +17,14 @@ type MPool struct {
 
 // Get retrieves a byte slice from the pool.
 func (p *MPool) Get() []byte {
-	ptr := p.Pool.Get().(*[]byte)
-	return *ptr
+	return p.Pool.Get().([]byte)
 }
 
 // Put returns a byte slice to the pool if it matches the expected capacity.
 func (p *MPool) Put(x []byte) {
 	// Allow slices with capacity >= sz (handles cases where the slice was resliced)
 	if cap(x) >= p.sz {
-		p.Pool.Put(&x)
+		p.Pool.Put(x[:p.sz])
 	}
 }
 
@@ -33,9 +32,8 @@ func (p *MPool) Put(x []byte) {
 func NewMPool(sz int) *MPool {
 	p := &MPool{sz: sz}
 	p.Pool = &sync.Pool{
-		New: func() any {
-			b := make([]byte, sz)
-			return &b
+		New: func() interface{} {
+			return make([]byte, p.sz)
 		},
 	}
 	return p
