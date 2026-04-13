@@ -104,7 +104,6 @@ func (h *Hub) onData(id uint16, data []byte) {
 		Error("link(%d) put data failed", id)
 		return
 	}
-	return
 }
 
 func (h *Hub) Start() {

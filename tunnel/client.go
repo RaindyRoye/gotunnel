@@ -3,8 +3,9 @@ package tunnel
 
 import (
 	"container/heap"
+	"crypto/rand"
 	"errors"
-	"math/rand"
+	"math/big"
 	"net"
 	"sync"
 	"time"
@@ -279,9 +280,15 @@ func backoff(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
 			break
 		}
 	}
-	// Add jitter: 50% ~ 100% of delay
-	jitter := time.Duration(rand.Int63n(int64(delay/2 + 1)))
-	return delay/2 + jitter
+	// Add jitter: 50% ~ 100% of delay using crypto/rand
+	halfDelay := delay / 2
+	if halfDelay > 0 {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(halfDelay)))
+		if err == nil {
+			return halfDelay + time.Duration(n.Int64())
+		}
+	}
+	return delay
 }
 
 // Start initializes the client.

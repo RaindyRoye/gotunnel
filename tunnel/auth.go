@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	TaaTokenSize     = aes.BlockSize // Size of the AES block (16 bytes)
-	TaaSignatureSize = sha256.Size      // Size of the sha256 hash (16 bytes)
-	TaaBlockSize     = TaaTokenSize + TaaSignatureSize // Total size of the auth block (32 bytes)
+	TaaTokenSize     = aes.BlockSize                   // Size of the AES block (16 bytes)
+	TaaSignatureSize = sha256.Size                     // Size of the sha256 hash (32 bytes)
+	TaaBlockSize     = TaaTokenSize + TaaSignatureSize // Total size of the auth block (48 bytes)
 )
 
 // authToken represents the core data for authentication: a challenge and a timestamp.

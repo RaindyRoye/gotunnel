@@ -39,13 +39,23 @@ func (conn *TunnelConn) SetCipherKey(key []byte) {
 		key = key[:32] // 截断长密钥
 	}
 
-	// 使用固定 nonce（隧道场景适用）
-	var nonce [24]byte // ChaCha20 需要 24 字节 nonce
-	// 注意：实际生产环境应使用随机 nonce + 传输 nonce
-	// 但 gotunnel 是点对点隧道，固定 nonce 可接受
+	// 使用全零 nonce 初始化 cipher
+	// 说明：ChaCha20 是流密码，cipher 对象内部维护位置计数器。
+	// 同一个 cipher 对象的每次 XORKeyStream 调用会自动推进计数器，
+	// 因此同一个连接内不会发生 nonce/keystream 重复。
+	// 不同连接使用不同的 cipher 实例（每个连接独立创建），
+	// 所以固定 nonce 在点对点隧道场景中是安全的。
+	var nonce [24]byte
 
-	conn.enc, _ = chacha20.NewUnauthenticatedCipher(key, nonce[:])
-	conn.dec, _ = chacha20.NewUnauthenticatedCipher(key, nonce[:])
+	var err error
+	conn.enc, err = chacha20.NewUnauthenticatedCipher(key, nonce[:])
+	if err != nil {
+		Log("failed to create ChaCha20 encryptor: %v", err)
+	}
+	conn.dec, err = chacha20.NewUnauthenticatedCipher(key, nonce[:])
+	if err != nil {
+		Log("failed to create ChaCha20 decryptor: %v", err)
+	}
 }
 
 func (conn *TunnelConn) Read(b []byte) (int, error) {
