@@ -1,7 +1,9 @@
 package tunnel
 
 import (
+	"bytes"
 	"container/heap"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
@@ -155,14 +157,13 @@ func TestBackoffExponentialGrowth(t *testing.T) {
 // 5. TUN_HEARTBEAT → rcvd 更新，返回 true
 
 func TestClientHubOnCtrlHeartbeat(t *testing.T) {
-	ca, _ := net.Pipe()
+	ca, cb := net.Pipe()
 	defer ca.Close()
+	defer cb.Close()
 	tun := newTunnel(ca)
 
 	ch := &ClientHub{
-		Hub:  newHub(tun),
-		sent: 0,
-		rcvd: 0,
+		Hub: newHub(tun),
 	}
 
 	result := ch.onCtrl(Cmd{Cmd: TUN_HEARTBEAT, Id: 42})
@@ -170,34 +171,35 @@ func TestClientHubOnCtrlHeartbeat(t *testing.T) {
 	if !result {
 		t.Fatal("onCtrl should return true for TUN_HEARTBEAT")
 	}
-	if ch.rcvd != 42 {
-		t.Fatalf("rcvd: got %d, want 42", ch.rcvd)
+	if ch.rcvd.Load() != 42 {
+		t.Fatalf("rcvd: got %d, want 42", ch.rcvd.Load())
 	}
 }
 
 // 6. 非 TUN_HEARTBEAT → passthrough，返回 false，rcvd 不变
 
 func TestClientHubOnCtrlPassthrough(t *testing.T) {
-	ca, _ := net.Pipe()
+	ca, cb := net.Pipe()
 	defer ca.Close()
+	defer cb.Close()
 	tun := newTunnel(ca)
 
 	ch := &ClientHub{
-		Hub:  newHub(tun),
-		sent: 10,
-		rcvd: 5,
+		Hub: newHub(tun),
 	}
+	ch.sent.Store(10)
+	ch.rcvd.Store(5)
 
 	result := ch.onCtrl(Cmd{Cmd: LINK_CLOSE, Id: 1})
 
 	if result {
 		t.Fatal("onCtrl should return false for non-TUN_HEARTBEAT")
 	}
-	if ch.rcvd != 5 {
-		t.Fatalf("rcvd should be unchanged: got %d, want 5", ch.rcvd)
+	if ch.rcvd.Load() != 5 {
+		t.Fatalf("rcvd should be unchanged: got %d, want 5", ch.rcvd.Load())
 	}
-	if ch.sent != 10 {
-		t.Fatalf("sent should be unchanged: got %d, want 10", ch.sent)
+	if ch.sent.Load() != 10 {
+		t.Fatalf("sent should be unchanged: got %d, want 10", ch.sent.Load())
 	}
 }
 
@@ -206,7 +208,8 @@ func TestClientHubOnCtrlPassthrough(t *testing.T) {
 // newTestClient creates a Client with an empty HubQueue for state management tests.
 func newTestClient() *Client {
 	cli := &Client{
-		cq: make(HubQueue, 0),
+		alloc: newAllocator(),
+		cq:    make(HubQueue, 0),
 	}
 	heap.Init(&cli.cq)
 	return cli
@@ -338,4 +341,134 @@ func TestClientHubManagementEdgeCases(t *testing.T) {
 	cli.dropHub(a)   // 已删除 item 的 dropHub 不 panic
 }
 
-// ---- Tier 1 (continued) ----
+// ---- Tier 3: heartbeat 逻辑 ----
+//
+// heartbeat() goroutine 周期发送 TUN_HEARTBEAT，收到 echo 后更新 rcvd，
+// 连续 maxSpan 次无 echo 则 Hub.Close() 超时断开。
+//
+// 11. 收到 echo → rcvd 更新 — Hub.Start() + onCtrlFilter 端到端
+
+func TestClientHubHeartbeatEcho(t *testing.T) {
+	origTO := Timeout
+	Timeout = 30
+	defer func() { Timeout = origTO }()
+
+	a, b := newPipeTunnels()
+	ch := &ClientHub{
+		Hub: newHub(a),
+	}
+
+	// 用 channel hook 检测 echo 回传，避免直接读取 ch.rcvd（data race）
+	echoCh := make(chan uint16, 10)
+	ch.Hub.onCtrlFilter = func(cmd Cmd) bool {
+		if ch.onCtrl(cmd) {
+			echoCh <- cmd.Id
+			return true
+		}
+		return false
+	}
+
+	// Hub.Start() 处理入站包
+	startDone := make(chan struct{})
+	go func() {
+		ch.Hub.Start()
+		close(startDone)
+	}()
+
+	// heartbeat() 发送心跳
+	hbDone := make(chan struct{})
+	go func() {
+		ch.heartbeat()
+		close(hbDone)
+	}()
+
+	// peer echo: 收到 TUN_HEARTBEAT 后回传
+	echoDone := make(chan struct{})
+	go func() {
+		defer close(echoDone)
+		for {
+			linkid, data, err := b.ReadPacket()
+			if err != nil {
+				return
+			}
+			if linkid != 0 {
+				t.Errorf("unexpected data packet: linkid=%d", linkid)
+				mpool.Put(data)
+				continue
+			}
+			var cmd Cmd
+			if binary.Read(bytes.NewBuffer(data), binary.LittleEndian, &cmd) == nil && cmd.Cmd == TUN_HEARTBEAT {
+				resp := mpool.Get()[0:0]
+				respBuf := bytes.NewBuffer(resp)
+				binary.Write(respBuf, binary.LittleEndian, &Cmd{Cmd: TUN_HEARTBEAT, Id: cmd.Id})
+				b.WritePacket(0, respBuf.Bytes())
+			}
+			mpool.Put(data)
+		}
+	}()
+
+	// 等待 3 个 echo 回传，验证 Id 递增
+	for i := 1; i <= 3; i++ {
+		select {
+		case id := <-echoCh:
+			if id != uint16(i) {
+				t.Fatalf("echo %d: got Id=%d, want %d", i, id, i)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timeout waiting for echo %d", i)
+		}
+	}
+
+	a.Close()
+	<-hbDone
+	<-startDone
+	<-echoDone
+}
+
+// 12. 连续未收到 echo → 超时断开 — Hub.Close() 被调用
+func TestClientHubHeartbeatTimeout(t *testing.T) {
+	// Heartbeat=1s, Timeout=0 → maxSpan=tunnelMinSpan=3
+	// 3 ticks 无 echo → Hub.Close()
+	origHB := Heartbeat
+	Heartbeat = 1
+	defer func() { Heartbeat = origHB }()
+
+	a, b := newPipeTunnels()
+	ch := &ClientHub{
+		Hub: newHub(a),
+	}
+
+	hbDone := make(chan struct{})
+	go func() {
+		ch.heartbeat()
+		close(hbDone)
+	}()
+
+	// peer 消费心跳但不回传（使 span 累积）
+	peerDone := make(chan struct{})
+	go func() {
+		defer close(peerDone)
+		for {
+			_, data, err := b.ReadPacket()
+			if err != nil {
+				return
+			}
+			mpool.Put(data)
+		}
+	}()
+
+	// heartbeat 应在 ~3 秒后因超时退出
+	select {
+	case <-hbDone:
+		// heartbeat 已退出 — 隧道被 Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("heartbeat should have timed out within 5 seconds")
+	}
+
+	// peer 也应退出（tunnel 关闭后 ReadPacket 返回 error）
+	select {
+	case <-peerDone:
+	case <-time.After(time.Second):
+		t.Fatal("peer should have exited after tunnel close")
+	}
+}

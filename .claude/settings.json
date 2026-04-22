@@ -4,7 +4,8 @@
       "Bash(rtk *)",
       "Bash(git *)",
       "Bash(go *)",
-      "Bash(/usr/local/go/bin/go *)"
+      "Bash(/usr/local/go/bin/go *)",
+      "Bash(sed *)"
     ]
   }
 }

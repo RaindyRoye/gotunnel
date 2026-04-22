@@ -8,14 +8,15 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // ClientHub extends Hub to manage client-side links and implement heartbeat logic.
 type ClientHub struct {
-	*Hub        // Embedding Hub provides all its methods and fields
-	sent uint16 // Counter for the last heartbeat ID sent
-	rcvd uint16 // Counter for the last heartbeat ID received from the server
+	*Hub                // Embedding Hub provides all its methods and fields
+	sent atomic.Uint32  // Counter for the last heartbeat ID sent
+	rcvd atomic.Uint32  // Counter for the last heartbeat ID received from the server
 }
 
 // heartbeat runs in a separate goroutine and manages tunnel liveness checks.
@@ -33,18 +34,20 @@ func (h *ClientHub) heartbeat() {
 	Debug("ClientHub heartbeat maxSpan: %d (interval: %v, timeout: %v)", maxSpan, heartbeatInterval, timeoutDuration)
 
 	for range ticker.C {
-		span := (h.sent + 1 - h.rcvd) & 0xFFFF
+		sent := uint16(h.sent.Load())
+		rcvd := uint16(h.rcvd.Load())
+		span := (sent + 1 - rcvd) & 0xFFFF
 
 		if int(span) >= maxSpan {
 			Error("tunnel(%v) heartbeat timeout. Sent: %d, Last Received Ack: %d, Calculated Span: %d",
-				h.Hub.tunnel, h.sent, h.rcvd, span)
+				h.Hub.tunnel, sent, rcvd, span)
 			h.Hub.Close()
 			break
 		}
 
-		h.sent++
-		if !h.SendCmd(h.sent, TUN_HEARTBEAT) {
-			Debug("ClientHub failed to send heartbeat %d, stopping.", h.sent)
+		newSent := h.sent.Add(1)
+		if !h.SendCmd(uint16(newSent), TUN_HEARTBEAT) {
+			Debug("ClientHub failed to send heartbeat %d, stopping.", newSent)
 			break
 		}
 	}
@@ -53,7 +56,7 @@ func (h *ClientHub) heartbeat() {
 // onCtrl acts as a filter for control commands received by the client hub.
 func (h *ClientHub) onCtrl(cmd Cmd) bool {
 	if cmd.Cmd == TUN_HEARTBEAT {
-		h.rcvd = cmd.Id
+		h.rcvd.Store(uint32(cmd.Id))
 		return true
 	}
 	return false
@@ -62,9 +65,7 @@ func (h *ClientHub) onCtrl(cmd Cmd) bool {
 // newClientHub creates and starts a new ClientHub instance.
 func newClientHub(tunnel *Tunnel) *ClientHub {
 	h := &ClientHub{
-		Hub:  newHub(tunnel),
-		sent: 0,
-		rcvd: 0,
+		Hub: newHub(tunnel),
 	}
 	h.Hub.onCtrlFilter = h.onCtrl
 	go h.heartbeat()
