@@ -99,6 +99,54 @@ func TestBufferConcurrent(t *testing.T) {
 	}
 }
 
+func TestBufferNewZeroOrNegative(t *testing.T) {
+	for _, sz := range []int{0, -1} {
+		buf := NewBuffer(sz)
+		// 验证不会 panic，能正常 Put/Pop
+		if !buf.Put([]byte("x")) {
+			t.Fatalf("NewBuffer(%d): Put should succeed", sz)
+		}
+		data, ok := buf.Pop()
+		if !ok || string(data) != "x" {
+			t.Fatalf("NewBuffer(%d): Pop should return 'x', got %q, ok=%v", sz, data, ok)
+		}
+	}
+}
+
+func TestBufferClose(t *testing.T) {
+	buf := NewBuffer(4)
+	buf.Put([]byte("a"))
+	buf.Put([]byte("b"))
+
+	if !buf.Close() {
+		t.Fatal("first Close should return true")
+	}
+	if buf.Close() {
+		t.Fatal("second Close should return false")
+	}
+
+	// Close 后 Put 应失败
+	if buf.Put([]byte("c")) {
+		t.Fatal("Put on closed buffer should return false")
+	}
+
+	// Close 后已有数据仍可取出
+	data, ok := buf.Pop()
+	if !ok || string(data) != "a" {
+		t.Fatal("should get 'a' after close")
+	}
+	data, ok = buf.Pop()
+	if !ok || string(data) != "b" {
+		t.Fatal("should get 'b' after close")
+	}
+
+	// 取空后返回 (nil, false)
+	_, ok = buf.Pop()
+	if ok {
+		t.Fatal("Pop on closed empty buffer should return false")
+	}
+}
+
 func TestBufferConcurrentCloseWakesPop(t *testing.T) {
 	buf := NewBuffer(4)
 

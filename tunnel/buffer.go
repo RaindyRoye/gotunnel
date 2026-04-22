@@ -122,7 +122,7 @@ func (b *Buffer) Pop() ([]byte, bool) {
 			// Retrieve the data at the 'start' index.
 			data := b.buf[b.start]
 			// Clear the reference to the data in the old slice to help GC if needed.
-			// b.buf[b.start] = nil // Optional: Uncomment if slices hold pointers and you want to hint at GC
+			b.buf[b.start] = nil                 // Optional: Uncomment if slices hold pointers and you want to hint at GC
 			b.start = (b.start + 1) % cap(b.buf) // Move start pointer, wrap around if necessary
 			return data, true
 		}
