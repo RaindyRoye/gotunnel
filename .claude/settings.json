@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(rtk *)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(go *)",
+      "Bash(/usr/local/go/bin/go *)"
     ]
   }
 }
