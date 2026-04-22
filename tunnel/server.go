@@ -9,7 +9,7 @@ import (
 // ServerHub extends Hub to manage links specifically for a tunnel server.
 // It handles incoming link requests and connects them to a backend server.
 type ServerHub struct {
-	*Hub      // Embedding Hub provides all its methods and fields
+	*Hub               // Embedding Hub provides all its methods and fields
 	baddr *net.TCPAddr // Address of the backend server to which links are forwarded
 }
 

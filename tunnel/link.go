@@ -23,7 +23,7 @@ type link struct {
 	rerr error      // if read closed, error to give reads
 }
 
-// set rerr
+// setRerr sets the read error. Returns false if already set.
 func (l *link) setRerr(err error) bool {
 	l.lock.Lock()
 	defer l.lock.Unlock()
@@ -34,6 +34,13 @@ func (l *link) setRerr(err error) bool {
 
 	l.rerr = err
 	return true
+}
+
+// getRerr returns the current read error under the lock.
+func (l *link) getRerr() error {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	return l.rerr
 }
 
 // stop read data from link
@@ -54,17 +61,17 @@ func (l *link) aclose() {
 
 // read data from link
 func (l *link) read() ([]byte, error) {
-	if l.rerr != nil {
-		return nil, l.rerr
+	if err := l.getRerr(); err != nil {
+		return nil, err
 	}
 	b := mpool.Get()
 	n, err := l.conn.Read(b)
 	if err != nil {
 		l.setRerr(err)
-		return nil, l.rerr
+		return nil, err
 	}
-	if l.rerr != nil {
-		return nil, l.rerr
+	if err := l.getRerr(); err != nil {
+		return nil, err
 	}
 	return b[:n], nil
 }
