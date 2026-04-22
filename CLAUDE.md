@@ -53,3 +53,8 @@ go test -race -cover ./tunnel/
 - `WritePacket` 会 defer `mpool.Put(data)` — 调用方必须传入 mpool 分配的切片
 - `link.aclose/rclose/wclose` 使用 `sync.Once` — 可安全重复调用
 - `Hub.Start()` 是主分发循环；退出时会重置所有 link
+
+## 坑的列表
+
+- net.Pipe() 同步无缓冲，SendCmd/Send 必须 goroutine 化（和 conn_test 一致）
+- mpool.Get() 可能返回短切片，必须用 getFullBuf() 确保 len=TunnelPacketSize。test代码使用data := getFullBuf()。

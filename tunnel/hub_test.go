@@ -2,8 +2,11 @@ package tunnel
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net"
+	"sync"
 	"testing"
+	"time"
 )
 
 // hub_test Tier 1 — 直接方法调用（无 goroutine，最简单）
@@ -268,5 +271,212 @@ func TestHubResetAllLink(t *testing.T) {
 	// link 仍在 map 中（resetAllLink 只关闭不删除）
 	if h.getLink(1) == nil || h.getLink(2) == nil || h.getLink(3) == nil {
 		t.Fatal("links should still exist in map after resetAllLink")
+	}
+}
+
+// ---- Tier 2: 通过 pipe tunnel 测试调度（需要 goroutine）----
+//
+// 使用 newPipeTunnels() 创建连接对，一端 Hub.Start() 在 goroutine 中运行，
+// 另一端作为 peer 注入/验证数据包。
+// 通过 onCtrlFilter 的 channel 回调实现同步等待。
+
+// ---- 14. SendCmd ----
+
+func TestHubSendCmd(t *testing.T) {
+	a, b := newPipeTunnels()
+	h := newHub(a)
+
+	var sendOk bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sendOk = h.SendCmd(1, LINK_CLOSE)
+	}()
+
+	// peer 应收到 control packet（linkid=0）
+	linkid, data, err := b.ReadPacket()
+	wg.Wait()
+
+	if err != nil {
+		t.Fatalf("ReadPacket: %v", err)
+	}
+	defer mpool.Put(data)
+
+	if !sendOk {
+		t.Fatal("SendCmd should succeed")
+	}
+	if linkid != 0 {
+		t.Fatalf("linkid: got %d, want 0 (control)", linkid)
+	}
+
+	var cmd Cmd
+	buf := bytes.NewBuffer(data)
+	if err := binary.Read(buf, binary.LittleEndian, &cmd); err != nil {
+		t.Fatalf("parse cmd: %v", err)
+	}
+	if cmd.Cmd != LINK_CLOSE || cmd.Id != 1 {
+		t.Fatalf("cmd: got {Cmd=%d, Id=%d}, want {LINK_CLOSE, 1}", cmd.Cmd, cmd.Id)
+	}
+}
+
+// ---- 15. Send ----
+
+func TestHubSend(t *testing.T) {
+	a, b := newPipeTunnels()
+	h := newHub(a)
+
+	payload := []byte("hello from send")
+
+	var sendOk bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		data := getFullBuf()
+		copy(data, payload)
+		sendOk = h.Send(42, data[:len(payload)])
+	}()
+
+	linkid, gotData, err := b.ReadPacket()
+	wg.Wait()
+
+	if err != nil {
+		t.Fatalf("ReadPacket: %v", err)
+	}
+	defer mpool.Put(gotData)
+
+	if !sendOk {
+		t.Fatal("Send should succeed")
+	}
+	if linkid != 42 {
+		t.Fatalf("linkid: got %d, want 42", linkid)
+	}
+	if !bytes.Equal(gotData, payload) {
+		t.Fatalf("data: got %q, want %q", gotData, payload)
+	}
+}
+
+// ---- 16. Start 调度 ctrl packet ----
+
+func TestHubStartCtrlDispatch(t *testing.T) {
+	a, b := newPipeTunnels()
+	h := newHub(b)
+	l := h.createLink(1)
+
+	ctrlCh := make(chan Cmd, 1)
+	h.onCtrlFilter = func(cmd Cmd) bool {
+		ctrlCh <- cmd
+		return false // passthrough，让默认逻辑也执行
+	}
+
+	startDone := make(chan struct{})
+	go func() {
+		h.Start()
+		close(startDone)
+	}()
+
+	// 通过 peer tunnel 发送 control packet（linkid=0）
+	ctrlData := mpool.Get()[0:0]
+	ctrlBuf := bytes.NewBuffer(ctrlData)
+	binary.Write(ctrlBuf, binary.LittleEndian, &Cmd{Cmd: LINK_CLOSE, Id: 1})
+	if err := a.WritePacket(0, ctrlBuf.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+
+	// 验证 onCtrlFilter 收到命令
+	select {
+	case cmd := <-ctrlCh:
+		if cmd.Cmd != LINK_CLOSE || cmd.Id != 1 {
+			t.Fatalf("got {Cmd=%d, Id=%d}, want {LINK_CLOSE, 1}", cmd.Cmd, cmd.Id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for ctrl dispatch")
+	}
+
+	// passthrough 后默认逻辑应执行 → aclose 应已关闭读写
+	if l.write([]byte("x")) {
+		t.Fatal("link write should fail after LINK_CLOSE passthrough")
+	}
+
+	a.Close()
+	<-startDone
+}
+
+// ---- 17. Start 调度 data packet ----
+
+func TestHubStartDataDispatch(t *testing.T) {
+	a, b := newPipeTunnels()
+	h := newHub(b)
+	l := h.createLink(1)
+
+	startDone := make(chan struct{})
+	go func() {
+		h.Start()
+		close(startDone)
+	}()
+
+	// 通过 peer tunnel 发送 data packet（linkid=1）
+	payload := []byte("routed data")
+	data := getFullBuf()
+	copy(data, payload)
+	if err := a.WritePacket(1, data[:len(payload)]); err != nil {
+		t.Fatal(err)
+	}
+
+	// 用 goroutine + timeout 防止 Pop 永久阻塞
+	popCh := make(chan []byte, 1)
+	go func() {
+		got, ok := l.wbuf.Pop()
+		if ok {
+			popCh <- got
+		}
+	}()
+
+	select {
+	case got := <-popCh:
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("got %q, want %q", got, payload)
+		}
+		mpool.Put(got)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for wbuf.Pop")
+	}
+
+	a.Close()
+	<-startDone
+}
+
+// ---- 18. Start 退出 → resetAllLink ----
+
+func TestHubStartExitResetsLinks(t *testing.T) {
+	a, b := newPipeTunnels()
+	h := newHub(b)
+	l1 := h.createLink(1)
+	l2 := h.createLink(2)
+
+	startDone := make(chan struct{})
+	go func() {
+		h.Start()
+		close(startDone)
+	}()
+
+	// 关闭 peer tunnel → Start() 读到 EOF → 退出 → resetAllLink
+	a.Close()
+
+	select {
+	case <-startDone:
+	case <-time.After(time.Second):
+		t.Fatal("Start() didn't exit after peer close")
+	}
+
+	// 所有 link 应被重置
+	for _, l := range []*link{l1, l2} {
+		if l.rerr == nil {
+			t.Fatalf("link(%d) should be read-closed after Start exits", l.id)
+		}
+		if l.write([]byte("x")) {
+			t.Fatalf("link(%d) write should fail after Start exits", l.id)
+		}
 	}
 }
