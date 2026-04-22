@@ -31,6 +31,7 @@ func (h *ServerHub) handleLink(l *link) {
 	}
 
 	tcpConn := conn.(*net.TCPConn)
+	defer conn.Close() // Ensure fd is released after startLink (CloseRead+CloseWrite don't release fd)
 	// Successfully connected to the backend. Start the link's I/O routines.
 	h.startLink(l, tcpConn)
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"os"
+	"runtime/debug"
 	"sync"
 	"testing"
 	"time"
@@ -435,4 +437,178 @@ func TestIntegrationMultipleTunnels(t *testing.T) {
 		// 这里只需验证 10 个连接全部成功即可证明负载均衡工作
 		_ = item
 	}
+}
+
+// ---- #31: 后端连接数限制 → accept 后立即关闭 → LINK_CLOSE ----
+//
+// 模拟上游限制连接数的场景：backend 维护并发连接计数，达到上限后 accept+立即关闭。
+// 连接被拒绝后 server 的 startLink 读 goroutine 收到 EOF → LINK_CLOSE_SEND → client 断开。
+//
+// fd 泄露检测：
+//   禁用 GC → 禁止 finalizer 兜底关闭 fd。做 N 次被拒绝的连接，比较 fd 数量变化。
+//   - 有 defer conn.Close()：handleLink 返回后 fd 立即释放 → fd 数不变
+//   - 无 defer conn.Close()：fd 泄露 → fd 数增长 ≥ N
+
+// countOpenFDs 返回当前进程打开的文件描述符数量。
+func countOpenFDs(t *testing.T) int {
+	t.Helper()
+	f, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Skipf("cannot read /dev/fd: %v", err)
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(0)
+	if err != nil {
+		t.Fatalf("readdirnames /dev/fd: %v", err)
+	}
+	return len(names)
+}
+
+// startLimitedBackend 启动一个有并发连接数限制的 echo server。
+// 超过 maxConns 的连接会被 accept 后立即关闭（模拟真实服务端的拒绝行为）。
+func startLimitedBackend(t *testing.T, maxConns int) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sem := make(chan struct{}, maxConns)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case sem <- struct{}{}:
+				go func(c net.Conn) {
+					io.Copy(c, c)
+					c.Close()
+					<-sem
+				}(conn)
+			default:
+				conn.Close()
+			}
+		}
+	}()
+	return ln
+}
+
+func TestIntegrationBackendConnectionLimit(t *testing.T) {
+	// 禁用 GC，防止 net.Conn 的 finalizer 兜底关闭泄露的 fd
+	old := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(old)
+
+	// Backend: 最多 1 个并发连接，超出则 accept+立即关闭
+	echoLn := startLimitedBackend(t, 1)
+	defer echoLn.Close()
+
+	// Server
+	server, err := NewServer("127.0.0.1:0", echoLn.Addr().String(), "testsecret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go server.Start()
+	defer server.ln.Close()
+
+	// Client（仅结构体）
+	client, err := NewClient("127.0.0.1:0", server.ln.Addr().String(), "testsecret", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 创建 1 个 tunnel
+	hub, err := client.createHub()
+	if err != nil {
+		t.Fatalf("createHub failed: %v", err)
+	}
+	client.addHub(hub)
+	hubDone := make(chan struct{})
+	go func() {
+		hub.Start()
+		close(hubDone)
+	}()
+	defer func() {
+		hub.Hub.Close()
+		<-hubDone
+	}()
+
+	// Client listener + accept loop
+	clientLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientLn.Close()
+
+	go func() {
+		for {
+			conn, err := clientLn.Accept()
+			if err != nil {
+				return
+			}
+			tcpConn := conn.(*net.TCPConn)
+			h := client.fetchHub()
+			if h == nil {
+				conn.Close()
+				continue
+			}
+			go client.handleConn(h, tcpConn)
+		}
+	}()
+
+	dial := func() net.Conn {
+		t.Helper()
+		conn, err := net.DialTimeout("tcp", clientLn.Addr().String(), 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return conn
+	}
+
+	// --- conn1: 占住 backend 的唯一配额 ---
+	conn1 := dial()
+	msg1 := []byte("round-1")
+	if _, err := conn1.Write(msg1); err != nil {
+		t.Fatalf("round 1 write: %v", err)
+	}
+	buf1 := make([]byte, len(msg1))
+	if _, err := io.ReadFull(conn1, buf1); err != nil {
+		t.Fatalf("round 1 read: %v", err)
+	}
+	if !bytes.Equal(buf1, msg1) {
+		t.Fatalf("round 1: got %q, want %q", buf1, msg1)
+	}
+	// conn1 保持打开，占住配额
+
+	// 记录 fd 基线（conn1 的 backend fd 仍活跃，但它是正常持有非泄露）
+	time.Sleep(100 * time.Millisecond)
+	baseline := countOpenFDs(t)
+
+	// --- conn2~conn6: 连续 5 次被拒绝（backend accept+close → EOF → LINK_CLOSE） ---
+	const numRejected = 5
+	for i := 0; i < numRejected; i++ {
+		conn := dial()
+		conn.Write([]byte("x"))
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		conn.Read(make([]byte, 100)) // 读到 EOF 或 timeout
+		conn.Close()
+	}
+
+	// 等待 server 端 cleanup chain 完成：
+	// backend close → server LINK_CLOSE_SEND → client wclose → LINK_CLOSE_RECV
+	// → client conn.Close → LINK_CLOSE_SEND → server wclose → startLink 返回 → handleLink 返回
+	time.Sleep(500 * time.Millisecond)
+
+	leaked := countOpenFDs(t) - baseline
+	if leaked > 1 {
+		t.Fatalf("fd leak detected: %d fds before, %d after (%d leaked after %d rejected connections)",
+			baseline, baseline+leaked, leaked, numRejected)
+	}
+
+	// --- 释放 conn1，验证恢复 ---
+	conn1.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	connRecovery := dial()
+	echoThenClose(t, connRecovery, []byte("recovery"))
 }
