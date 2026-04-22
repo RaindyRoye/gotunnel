@@ -31,6 +31,9 @@ func (p *MPool) Put(x []byte) {
 
 // NewMPool creates a new memory pool for byte slices of the given size.
 func NewMPool(sz int) *MPool {
+	if sz <= 0 {
+		sz = 1
+	}
 	p := &MPool{sz: sz}
 	p.Pool = &sync.Pool{
 		New: func() any {

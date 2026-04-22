@@ -13,6 +13,8 @@ go build -o bin/gotunnel .          # 另一种方式
 服务端：`./gotunnel -listen=:8001 -backend=127.0.0.1:3128 -secret="key"`
 客户端：`./gotunnel -tunnels=100 -listen=127.0.0.1:8080 -backend=server:8001 -secret="key"`
 
+如果go不存在，尝试`/usr/local/go/bin/go`找。
+
 ## 测试
 
 ```bash
