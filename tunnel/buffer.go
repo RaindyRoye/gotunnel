@@ -8,11 +8,11 @@ import (
 // Buffer is a thread-safe circular buffer for storing byte slices ([]byte).
 // It uses sync.Cond for efficient waiting when the buffer is empty or full.
 type Buffer struct {
-	start  int       // Index of the first element in the buffer
-	end    int       // Index where the next element will be placed
-	buf    [][]byte  // The underlying slice acting as the circular buffer
+	start  int        // Index of the first element in the buffer
+	end    int        // Index where the next element will be placed
+	buf    [][]byte   // The underlying slice acting as the circular buffer
 	cond   *sync.Cond // Condition variable for blocking Pop on empty and signaling on Put
-	closed bool      // Flag indicating if the buffer is closed
+	closed bool       // Flag indicating if the buffer is closed
 }
 
 // bufferLen calculates the current number of elements in the buffer.
@@ -86,8 +86,8 @@ func (b *Buffer) Put(data []byte) bool {
 			} else { // b.end < b.start (wrap-around case)
 				// ... [start ... N) [0 ... end) ... -> ... [0 ... part1) [part1 ... part1+part2) ...
 				part1Len := oldCap - b.start
-				copy(newBuf, b.buf[b.start:oldCap])           // Copy from start to end of old buffer
-				copy(newBuf[part1Len:], b.buf[0:b.end])       // Copy from start of old buffer to end
+				copy(newBuf, b.buf[b.start:oldCap])     // Copy from start to end of old buffer
+				copy(newBuf[part1Len:], b.buf[0:b.end]) // Copy from start of old buffer to end
 			}
 		}
 
@@ -102,6 +102,7 @@ func (b *Buffer) Put(data []byte) bool {
 	b.end = (b.end + 1) % cap(b.buf) // Move end pointer, wrap around if necessary
 
 	// Signal one goroutine waiting in Pop that new data is available.
+	// 如果 Broadcast()，那么所有等待的 Pop() 都会被唤醒，这个不符合预期。
 	b.cond.Signal()
 	return true
 }
@@ -141,6 +142,9 @@ func (b *Buffer) Pop() ([]byte, bool) {
 // NewBuffer creates a new thread-safe Buffer with an initial capacity for sz elements.
 // sz must be greater than 0.
 func NewBuffer(sz int) *Buffer {
+	if sz <= 0 {
+		sz = 1
+	}
 	// Use sync.Mutex as the Locker for sync.Cond.
 	var mu sync.Mutex
 	return &Buffer{
