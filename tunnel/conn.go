@@ -9,10 +9,11 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
-	"golang.org/x/crypto/chacha20"
 	"io"
 	"net"
 	"sync"
+
+	"golang.org/x/crypto/chacha20"
 )
 
 var errTooLarge = fmt.Errorf("tunnel.Read: packet too large")
@@ -56,6 +57,10 @@ func (conn *TunnelConn) SetCipherKey(key []byte) {
 	if err != nil {
 		Log("failed to create ChaCha20 decryptor: %v", err)
 	}
+	// ChaCha20 软件执行极快的三个核心原因：
+	// 1. **SIMD 并行**：各数据块独立计算（计数器模式），可利用 AVX/NEON 向量指令集实现多块并发处理（RC4 为低效串行）。
+	// 2. **原生指令 (ARX)**：核心运算仅为加法、循环移位和异或，完美契合 CPU 底层单周期 ALU 指令。
+	// 3. **零内存访问**：64 字节内部状态完全驻留 CPU 寄存器。无 S-box 查表，Cache-miss 为 0。
 }
 
 func (conn *TunnelConn) Read(b []byte) (int, error) {
@@ -94,6 +99,7 @@ type Tunnel struct {
 
 // can write concurrently
 func (tun *Tunnel) WritePacket(linkid uint16, data []byte) (err error) {
+	// 写需要锁：因为 header + body + flush 必须是原子的。没有锁的话，两个 goroutine 的 header/body 会交叉写到线路上，对端无法解析。
 	defer mpool.Put(data)
 
 	tun.wlock.Lock()
@@ -125,6 +131,7 @@ func (tun *Tunnel) WritePacket(linkid uint16, data []byte) (err error) {
 
 // can't read concurrently
 func (tun *Tunnel) ReadPacket() (linkid uint16, data []byte, err error) {
+	//读不需要锁：只有一个 goroutine 调用 ReadPacket（Hub 的分发循环），bufio.Reader 本身也不是并发安全的。
 	var h header
 
 	if err = binary.Read(tun, binary.LittleEndian, &h); err != nil {
