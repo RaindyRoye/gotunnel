@@ -200,3 +200,142 @@ func TestClientHubOnCtrlPassthrough(t *testing.T) {
 		t.Fatalf("sent should be unchanged: got %d, want 10", ch.sent)
 	}
 }
+
+// ---- Tier 2: Client hub 状态管理（零 I/O，只操作堆）----
+
+// newTestClient creates a Client with an empty HubQueue for state management tests.
+func newTestClient() *Client {
+	cli := &Client{
+		cq: make(HubQueue, 0),
+	}
+	heap.Init(&cli.cq)
+	return cli
+}
+
+// 7. addHub + fetchHub 轮转均衡性
+//
+// 3 个 priority=0 的 item，fetchHub 300 次。
+// fetchHub 选中 min-priority item 并 priority++，因此严格轮转，各 100 次。
+
+func TestClientFetchHubRoundRobin(t *testing.T) {
+	cli := newTestClient()
+	items := []*HubItem{newTestHubItem(0), newTestHubItem(0), newTestHubItem(0)}
+
+	for _, item := range items {
+		cli.addHub(item)
+	}
+
+	if cli.cq.Len() != 3 {
+		t.Fatalf("queue len: got %d, want 3", cli.cq.Len())
+	}
+
+	counts := make(map[*HubItem]int)
+	const rounds = 300
+
+	for i := 0; i < rounds; i++ {
+		item := cli.fetchHub()
+		if item == nil {
+			t.Fatal("fetchHub should not return nil")
+		}
+		counts[item]++
+	}
+
+	expected := rounds / len(items)
+	for _, item := range items {
+		c := counts[item]
+		if c != expected {
+			t.Errorf("item got %d selections, want %d", c, expected)
+		}
+	}
+}
+
+// 8. dropHub → priority 恢复
+//
+// a(pri=3) 不如 b(pri=0) 受青睐。反复 dropHub(a) 使 priority 降到 0，
+// fetchHub 时 a 重新成为最优先。
+
+func TestClientDropHubRestoresPriority(t *testing.T) {
+	cli := newTestClient()
+	a := newTestHubItem(3)
+	b := newTestHubItem(0)
+
+	cli.addHub(a)
+	cli.addHub(b)
+
+	// b(0) 优先于 a(3)
+	item := cli.fetchHub()
+	if item != b {
+		t.Fatal("should pick b (lowest priority)")
+	}
+	// b.priority: 0→1, a still 3
+
+	// dropHub(a) 三次：3→2→1→0
+	cli.dropHub(a)
+	cli.dropHub(a)
+	cli.dropHub(a)
+
+	// a(0) 优先于 b(1)
+	item = cli.fetchHub()
+	if item != a {
+		t.Fatal("after dropHub, a should be most preferred")
+	}
+}
+
+// 9. removeHub → 从堆中删除
+
+func TestClientRemoveHub(t *testing.T) {
+	cli := newTestClient()
+	a := newTestHubItem(0)
+	b := newTestHubItem(0)
+	c := newTestHubItem(0)
+
+	cli.addHub(a)
+	cli.addHub(b)
+	cli.addHub(c)
+
+	cli.removeHub(b)
+
+	if cli.cq.Len() != 2 {
+		t.Fatalf("queue len: got %d, want 2", cli.cq.Len())
+	}
+	if b.index != -1 {
+		t.Fatalf("removed item index: got %d, want -1", b.index)
+	}
+
+	seen := map[*HubItem]bool{}
+	for i := 0; i < 2; i++ {
+		item := cli.fetchHub()
+		if item == b {
+			t.Fatal("removed item should not be fetchable")
+		}
+		seen[item] = true
+	}
+	if !seen[a] || !seen[c] {
+		t.Fatal("a and c should both be fetchable after removing b")
+	}
+}
+
+// 10. 边界情况：空队列 + 无效 item
+
+func TestClientHubManagementEdgeCases(t *testing.T) {
+	cli := newTestClient()
+
+	// 空 queue → fetchHub 返回 nil
+	if item := cli.fetchHub(); item != nil {
+		t.Fatal("fetchHub on empty queue should return nil")
+	}
+
+	// 无效 item（index=-1，从未入堆）
+	orphan := newTestHubItem(0)
+	cli.removeHub(orphan) // 不 panic
+	cli.dropHub(orphan)   // 不 panic
+
+	// 已删除的 item
+	a := newTestHubItem(0)
+	cli.addHub(a)
+	cli.removeHub(a)
+	cli.removeHub(a) // 重复删除不 panic
+	cli.dropHub(a)   // 已删除 item 的 dropHub 不 panic
+}
+
+// ---- Tier 1 (continued) ----
