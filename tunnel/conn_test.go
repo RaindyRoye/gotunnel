@@ -22,16 +22,7 @@ import (
 // 6. ReadPacket 过大包拒绝
 // 7. 读 EOF 传播
 //
-// 注意：mpool.Get() 可能返回被 reslice 过的短切片（cap >= sz 但 len < sz），
-// 因为 WritePacket 内部 defer mpool.Put(data) 会把 reslice 后的缓冲区归还。
-// 测试中统一用 getFullBuf() 获取完整长度的切片。
-
 // ---- helpers ----
-
-// getFullBuf 从 mpool 获取切片并 reslice 到完整长度。
-func getFullBuf() []byte {
-	return mpool.Get()[:TunnelPacketSize] // 强制len到TunnelPacketSize，防止panic。
-}
 
 // newPipeTunnels 返回一对通过 net.Pipe 互连的 Tunnel。
 func newPipeTunnels() (a, b *Tunnel) {
@@ -166,7 +157,7 @@ func TestTunnelPacketRoundTrip(t *testing.T) {
 	a, b := newPipeTunnels()
 
 	payload := []byte("hello packet")
-	data := getFullBuf()
+	data := mpool.Get()
 	copy(data, payload)
 	sendData := data[:len(payload)]
 
@@ -202,7 +193,7 @@ func TestTunnelPacketRoundTripEncrypted(t *testing.T) {
 	a, b := newPipeTunnelsWithKey(key)
 
 	payload := []byte("encrypted packet payload")
-	data := getFullBuf()
+	data := mpool.Get()
 	copy(data, payload)
 	sendData := data[:len(payload)]
 
@@ -249,7 +240,7 @@ func TestTunnelMultiplePackets(t *testing.T) {
 	go func() {
 		defer close(done)
 		for _, pkt := range packets {
-			data := getFullBuf()
+			data := mpool.Get()
 			copy(data, pkt.data)
 			if err := a.WritePacket(pkt.linkid, data[:len(pkt.data)]); err != nil {
 				t.Errorf("WritePacket linkid=%d: %v", pkt.linkid, err)
@@ -277,7 +268,7 @@ func TestTunnelMultiplePackets(t *testing.T) {
 func TestTunnelEmptyPacket(t *testing.T) {
 	a, b := newPipeTunnels()
 
-	data := getFullBuf()[:0]
+	data := mpool.Get()[:0]
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -350,7 +341,7 @@ func TestTunnelConcurrentWrite(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := 0; i < packetsPerWriter; i++ {
-				data := getFullBuf()
+				data := mpool.Get()
 				data[0] = byte(id)
 				data[1] = byte(i)
 				if err := a.WritePacket(uint16(id), data[:2]); err != nil {
@@ -388,14 +379,14 @@ func TestTunnelWritePacketErrorPropagation(t *testing.T) {
 	a, _ := newPipeTunnels()
 	a.Close()
 
-	data := getFullBuf()[:4]
+	data := mpool.Get()[:4]
 	err := a.WritePacket(1, data)
 	if err == nil {
 		t.Fatal("expected error writing to closed tunnel")
 	}
 
 	// 第二次写入应立即失败（werr 缓存）
-	data2 := getFullBuf()[:4]
+	data2 := mpool.Get()[:4]
 	err = a.WritePacket(2, data2)
 	if err == nil {
 		t.Fatal("expected cached error on second write")

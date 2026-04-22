@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -333,7 +334,7 @@ func TestHubSend(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		data := getFullBuf()
+		data := mpool.Get()
 		copy(data, payload)
 		sendOk = h.Send(42, data[:len(payload)])
 	}()
@@ -394,10 +395,24 @@ func TestHubStartCtrlDispatch(t *testing.T) {
 		t.Fatal("timeout waiting for ctrl dispatch")
 	}
 
-	// passthrough 后默认逻辑应执行 → aclose 应已关闭读写
-	if l.write([]byte("x")) {
-		t.Fatal("link write should fail after LINK_CLOSE passthrough")
+	// 1. Start() goroutine：onCtrlFilter 写入 channel → 返回 false
+	// 2. 测试 goroutine：从 channel 收到命令 → 立刻检查 l.write()
+	// 3. 但此时 onCtrl 还没来得及调用 l.aclose()
+	// onCtrlFilter 返回 false 后，onCtrl 还要执行 h.getLink(id) → l.aclose()。测试 goroutine 可能在 aclose 之前就检查了状态，所以 write
+	// 还能成功，断言失败。
+
+	// 用轮询等待 aclose 生效后才判定。goto closed 跳过 t.Fatal，避免用 break 跳出两层嵌套。
+	// onCtrlFilter 返回 false 后，onCtrl 继续执行 aclose()。
+	// 轮询等待 aclose 生效（跨 goroutine 无内存屏障，不能假设即时可见）。
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !l.write([]byte("x")) {
+			goto closed
+		}
+		runtime.Gosched()
 	}
+	t.Fatal("link write should fail after LINK_CLOSE passthrough")
+closed:
 
 	a.Close()
 	<-startDone
@@ -418,7 +433,7 @@ func TestHubStartDataDispatch(t *testing.T) {
 
 	// 通过 peer tunnel 发送 data packet（linkid=1）
 	payload := []byte("routed data")
-	data := getFullBuf()
+	data := mpool.Get()
 	copy(data, payload)
 	if err := a.WritePacket(1, data[:len(payload)]); err != nil {
 		t.Fatal(err)

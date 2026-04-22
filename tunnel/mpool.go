@@ -16,9 +16,11 @@ type MPool struct {
 }
 
 // Get retrieves a byte slice from the pool.
+// Always returns a slice with len == sz to avoid short slices
+// that may have been stored by Put after reslicing.
 func (p *MPool) Get() []byte {
 	ptr := p.Pool.Get().(*[]byte)
-	return *ptr
+	return (*ptr)[:p.sz]
 }
 
 // Put returns a byte slice to the pool if it matches the expected capacity.
