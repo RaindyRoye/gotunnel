@@ -1,0 +1,19 @@
+schema: spec-driven
+
+# 项目上下文：写入各制品指令，供 AI 遵循（勿把本块标签原文拷进产物文件）
+context: |
+  本仓库为 OpenSpec / OPSX 的说明与示例项目，文档以 Markdown 为主。
+  主要读者为使用 Cursor 的中文开发者；命令示例优先写 Cursor 的 `/opsx-*` 连字符形式。
+  权威 OPSX 说明见 docs/opsx.md、docs/workflows.md、docs/commands.md。
+
+rules:
+  proposal:
+    - 正文使用简体中文；保持简洁，篇幅控制在约两页 A4 以内。
+    - 「为什么 / 改什么 / 影响」要写清楚；实现细节留给 design 与 tasks。
+  specs:
+    - 需求与场景正文使用简体中文；规范句仍用 SHALL/MUST 等英文情态动词（与模板一致）。
+    - 每个需求至少一个场景；场景标题与步骤用中文表述（WHEN/THEN 标签可保留）。
+  design:
+    - 使用简体中文；决策写清「为何选 A 而非 B」；非目标必须显式列出。
+  tasks:
+    - 任务描述使用简体中文；checkbox 行格式仍用 `- [ ]` / `- [x]`。
