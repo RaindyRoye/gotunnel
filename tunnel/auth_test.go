@@ -28,4 +28,8 @@ func TestAuth(t *testing.T) {
 	if !a1.VerifyCipherBlock(b2) {
 		t.Fatal("verify exchanged block failed")
 	}
+
+	if a1.token != a2.token {
+		t.Fatal("token mismatch: a1 and a2 should have the same token after exchange")
+	}
 }
