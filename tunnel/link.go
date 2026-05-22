@@ -19,8 +19,9 @@ type link struct {
 	conn *net.TCPConn
 	wbuf *Buffer // write buffer
 
-	lock sync.Mutex // protects below fields
-	rerr error      // if read closed, error to give reads
+	lock       sync.Mutex // protects below fields
+	rerr       error      // if read closed, error to give reads
+	connClosed bool
 }
 
 // setRerr sets the read error. Returns false if already set.
@@ -53,10 +54,27 @@ func (l *link) wclose() bool {
 	return l.wbuf.Close()
 }
 
+func (l *link) closeConn() bool {
+	l.lock.Lock()
+	if l.connClosed {
+		l.lock.Unlock()
+		return false
+	}
+	l.connClosed = true
+	conn := l.conn
+	l.lock.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
+	return true
+}
+
 // close link
 func (l *link) aclose() {
 	l.rclose()
 	l.wclose()
+	l.closeConn()
 }
 
 // read data from link
@@ -99,10 +117,18 @@ func (l *link) _write() error {
 
 // set low level connection
 func (l *link) setConn(conn *net.TCPConn) {
+	l.lock.Lock()
 	if l.conn != nil {
+		l.lock.Unlock()
 		Panic("link(%d) repeated set conn", l.id)
 	}
 	l.conn = conn
+	closed := l.connClosed
+	l.lock.Unlock()
+
+	if closed {
+		_ = conn.Close()
+	}
 }
 
 // hub function

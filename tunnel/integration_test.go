@@ -494,6 +494,131 @@ func startLimitedBackend(t *testing.T, maxConns int) net.Listener {
 	return ln
 }
 
+// startHoldingLimitedBackend accepts up to maxConns connections and then holds
+// them open without reading or writing. This keeps the backend side from
+// voluntarily closing after a TCP half-close, making local fd cleanup observable.
+func startHoldingLimitedBackend(t *testing.T, maxConns int) (net.Listener, func() int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sem := make(chan struct{}, maxConns)
+	var lock sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				lock.Lock()
+				for _, conn := range conns {
+					conn.Close()
+				}
+				lock.Unlock()
+				return
+			}
+			select {
+			case sem <- struct{}{}:
+				// Keep the accepted connection open until the listener is closed.
+				lock.Lock()
+				conns = append(conns, conn)
+				lock.Unlock()
+			default:
+				conn.Close()
+			}
+		}
+	}()
+	return ln, func() int { return len(sem) }
+}
+
+func waitForIntegrationCondition(t *testing.T, timeout time.Duration, cond func() bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return cond()
+}
+
+func TestIntegrationTunnelResetReleasesBackendConn(t *testing.T) {
+	backendLn, activeBackendConns := startHoldingLimitedBackend(t, 1)
+	defer backendLn.Close()
+
+	server, err := NewServer("127.0.0.1:0", backendLn.Addr().String(), "testsecret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go server.Start()
+	defer server.ln.Close()
+
+	client, err := NewClient("127.0.0.1:0", server.ln.Addr().String(), "testsecret", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hub, err := client.createHub()
+	if err != nil {
+		t.Fatalf("createHub failed: %v", err)
+	}
+	client.addHub(hub)
+	hubDone := make(chan struct{})
+	go func() {
+		hub.Start()
+		close(hubDone)
+	}()
+
+	clientLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientLn.Close()
+	go func() {
+		for {
+			conn, err := clientLn.Accept()
+			if err != nil {
+				return
+			}
+			tcpConn := conn.(*net.TCPConn)
+			h := client.fetchHub()
+			if h == nil {
+				conn.Close()
+				continue
+			}
+			go client.handleConn(h, tcpConn)
+		}
+	}()
+
+	conn, err := net.DialTimeout("tcp", clientLn.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if !waitForIntegrationCondition(t, time.Second, func() bool {
+		return activeBackendConns() == 1
+	}) {
+		t.Fatalf("backend connection was not established, active=%d", activeBackendConns())
+	}
+	baselineFDs := countOpenFDs(t)
+
+	hub.Hub.Close()
+	<-hubDone
+
+	// Closing the client-side tunnel should release at least three fds in this
+	// process: the client tunnel fd, the server tunnel fd, and the server's
+	// backend fd. The bug only released the two tunnel fds.
+	if !waitForIntegrationCondition(t, 500*time.Millisecond, func() bool {
+		return baselineFDs-countOpenFDs(t) >= 3
+	}) {
+		afterFDs := countOpenFDs(t)
+		t.Fatalf("backend fd leaked after tunnel reset: before=%d after=%d closed=%d, want at least 3 closed fds",
+			baselineFDs, afterFDs, baselineFDs-afterFDs)
+	}
+}
+
 func TestIntegrationBackendConnectionLimit(t *testing.T) {
 	// 禁用 GC，防止 net.Conn 的 finalizer 兜底关闭泄露的 fd
 	old := debug.SetGCPercent(-1)
