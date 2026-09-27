@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 )
 
 // link_test 测试思路：
@@ -91,6 +92,69 @@ func TestLinkRclose(t *testing.T) {
 	}
 	if l.rclose() {
 		t.Fatal("second rclose should return false")
+	}
+}
+
+func TestLinkRcloseUnblocksRead(t *testing.T) {
+	for _, beforeConn := range []bool{false, true} {
+		name := "connected"
+		if beforeConn {
+			name = "before_setConn"
+		}
+		t.Run(name, func(t *testing.T) {
+			peer, conn := newTCPConnPair(t)
+			defer peer.Close()
+			defer conn.Close()
+			l := newTestLink(1, nil)
+			if beforeConn {
+				l.rclose()
+			}
+			l.setConn(conn)
+
+			started := make(chan struct{})
+			done := make(chan error, 1)
+			go func() {
+				buf := mpool.Get()[:TunnelPacketSize]
+				defer mpool.Put(buf)
+				close(started)
+				// Read the socket directly so the rerr check cannot mask a
+				// failure to interrupt reads already inside TCPConn.Read.
+				_, err := conn.Read(buf)
+				done <- err
+			}()
+			<-started
+			if !beforeConn {
+				l.rclose()
+			}
+			select {
+			case err := <-done:
+				if err != io.EOF {
+					t.Fatalf("read after rclose: got %v, want EOF", err)
+				}
+			case <-time.After(time.Second):
+				conn.Close()
+				<-done
+				t.Fatal("rclose did not unblock the socket read")
+			}
+
+			// Closing the read side must preserve the opposite direction.
+			if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conn.Write([]byte("reply")); err != nil {
+				t.Fatalf("write after rclose: %v", err)
+			}
+			if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, 5)
+			if _, err := io.ReadFull(peer, buf); err != nil {
+				t.Fatal(err)
+			}
+			if string(buf) != "reply" {
+				t.Fatalf("got %q, want reply", buf)
+			}
+		})
 	}
 }
 

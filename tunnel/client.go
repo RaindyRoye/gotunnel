@@ -228,7 +228,9 @@ func (cli *Client) handleConn(hub *HubItem, conn *net.TCPConn) {
 	defer h.deleteLink(id) // Ensure the link is removed from the hub on exit
 
 	// Request the server to create the corresponding link.
-	h.SendCmd(id, LINK_CREATE)
+	if !h.SendCmd(id, LINK_CREATE) {
+		return
+	}
 
 	// Start the bidirectional data forwarding between the local connection and the tunnel.
 	h.startLink(l, conn)

@@ -46,7 +46,19 @@ func (l *link) getRerr() error {
 
 // stop read data from link
 func (l *link) rclose() bool {
-	return l.setRerr(errPeerClosed)
+	l.lock.Lock()
+	if l.rerr != nil {
+		l.lock.Unlock()
+		return false
+	}
+	l.rerr = errPeerClosed
+	conn := l.conn
+	l.lock.Unlock()
+
+	if conn != nil {
+		_ = conn.CloseRead()
+	}
+	return true
 }
 
 // stop write data into link
@@ -85,10 +97,13 @@ func (l *link) read() ([]byte, error) {
 	b := mpool.Get()
 	n, err := l.conn.Read(b)
 	if err != nil {
+		mpool.Put(b)
 		l.setRerr(err)
-		return nil, err
+		// Preserve errPeerClosed when rclose interrupted the socket read.
+		return nil, l.getRerr()
 	}
 	if err := l.getRerr(); err != nil {
+		mpool.Put(b)
 		return nil, err
 	}
 	return b[:n], nil
@@ -124,10 +139,13 @@ func (l *link) setConn(conn *net.TCPConn) {
 	}
 	l.conn = conn
 	closed := l.connClosed
+	readClosed := l.rerr != nil
 	l.lock.Unlock()
 
 	if closed {
 		_ = conn.Close()
+	} else if readClosed {
+		_ = conn.CloseRead()
 	}
 }
 

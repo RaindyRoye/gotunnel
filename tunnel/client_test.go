@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"container/heap"
 	"encoding/binary"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -213,6 +214,56 @@ func newTestClient() *Client {
 	}
 	heap.Init(&cli.cq)
 	return cli
+}
+
+func TestClientHandleConnFailedLinkCreate(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	h := newHub(newTunnel(a))
+	cli := newTestClient()
+	cli.addHub(&HubItem{ClientHub: &ClientHub{Hub: h}})
+	item := cli.fetchHub()
+
+	// The selected hub can stop before the local connection handler starts.
+	b.Close()
+	h.Start()
+	cli.removeHub(item)
+
+	peer, conn := newTCPConnPair(t)
+	defer peer.Close()
+	done := make(chan struct{})
+	go func() {
+		cli.handleConn(item, conn)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		conn.Close()
+		h.resetAllLink()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("connection handler did not stop during cleanup")
+		}
+	})
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("failed LINK_CREATE left the connection handler running")
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("local connection: got %v, want EOF", err)
+	}
+	if len(h.links) != 0 {
+		t.Fatalf("failed LINK_CREATE left %d links", len(h.links))
+	}
+	if len(cli.alloc.freeList) != cap(cli.alloc.freeList) {
+		t.Fatal("failed LINK_CREATE did not release the link ID")
+	}
 }
 
 // 7. addHub + fetchHub 轮转均衡性
