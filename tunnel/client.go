@@ -5,6 +5,7 @@ import (
 	"container/heap"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"sync"
@@ -14,9 +15,9 @@ import (
 
 // ClientHub extends Hub to manage client-side links and implement heartbeat logic.
 type ClientHub struct {
-	*Hub                // Embedding Hub provides all its methods and fields
-	sent atomic.Uint32  // Counter for the last heartbeat ID sent
-	rcvd atomic.Uint32  // Counter for the last heartbeat ID received from the server
+	*Hub               // Embedding Hub provides all its methods and fields
+	sent atomic.Uint32 // Counter for the last heartbeat ID sent
+	rcvd atomic.Uint32 // Counter for the last heartbeat ID received from the server
 }
 
 // heartbeat runs in a separate goroutine and manages tunnel liveness checks.
@@ -82,7 +83,7 @@ type HubItem struct {
 // HubQueue implements container/heap.Interface for HubItem.
 type HubQueue []*HubItem
 
-func (hq HubQueue) Len() int { return len(hq) }
+func (hq HubQueue) Len() int           { return len(hq) }
 func (hq HubQueue) Less(i, j int) bool { return hq[i].priority < hq[j].priority }
 func (hq HubQueue) Swap(i, j int) {
 	hq[i], hq[j] = hq[j], hq[i]
@@ -106,10 +107,11 @@ func (hq *HubQueue) Pop() any {
 
 // Client manages multiple tunnel connections and listens for local connections to forward.
 type Client struct {
-	laddr   string // Local address to listen for incoming connections
-	backend string // Remote address of the tunnel server
-	secret  string // Shared secret for authentication
-	tunnels uint   // Number of concurrent tunnel connections to maintain
+	laddr   string         // Local address to listen for incoming connections
+	backend string         // Remote address of the tunnel server
+	secret  string         // Shared secret for authentication
+	tunnels uint           // Number of concurrent tunnel connections to maintain
+	route   routingRequest // Zero version selects the legacy single-backend protocol
 
 	alloc *IdAllocator // Allocator for unique link IDs
 	cq    HubQueue     // Concurrent queue (min-heap) of active hubs
@@ -127,9 +129,16 @@ func (cli *Client) createHub() (hub *HubItem, err error) {
 
 	// Wrap the connection with tunnel logic
 	tunnel := newTunnel(conn)
+	if cli.route.version != 0 {
+		if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
 
 	// Read the initial challenge block from the server
 	_, challenge, err := tunnel.ReadPacket()
+	defer mpool.Put(challenge)
 	if err != nil {
 		Error("client failed to read challenge from %v: %s", tunnel, err)
 		conn.Close() // Clean up the failed connection
@@ -147,12 +156,30 @@ func (cli *Client) createHub() (hub *HubItem, err error) {
 		conn.Close()
 		return nil, err
 	}
+	if cli.route.version != 0 {
+		token = a.routingResponse(token, cli.route)
+	}
 
 	// Send the response token back to the server
 	if err = tunnel.WritePacket(0, token); err != nil {
 		Error("client failed to write token response to %v: %s", tunnel, err)
 		conn.Close()
 		return nil, err
+	}
+	if cli.route.version != 0 {
+		_, ack, err := tunnel.ReadPacket()
+		if err == nil {
+			err = a.verifyRoutingAck(cli.route, ack)
+		}
+		mpool.Put(ack)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("route %q handshake failed (server must support the requested routing mode): %w", cli.route.destination, err)
+		}
+		if err := conn.SetDeadline(time.Time{}); err != nil {
+			conn.Close()
+			return nil, err
+		}
 	}
 
 	// Authentication successful. Set up the encryption key for the tunnel session.
@@ -359,5 +386,32 @@ func NewClient(listen, backend, secret string, tunnels uint) (*Client, error) {
 	// Initialize the heap structure on the slice
 	heap.Init(&client.cq)
 
+	return client, nil
+}
+
+// NewTaggedClient binds every tunnel created by this client to the same tag.
+func NewTaggedClient(listen, backend, secret string, tunnels uint, tag string) (*Client, error) {
+	if err := validateTag(tag); err != nil {
+		return nil, err
+	}
+	client, err := NewClient(listen, backend, secret, tunnels)
+	if err != nil {
+		return nil, err
+	}
+	client.route = routingRequest{tagVersion, tag}
+	return client, nil
+}
+
+// NewTargetClient binds every tunnel to a backend address chosen by this client.
+// The server must explicitly allow client-specified backends.
+func NewTargetClient(listen, backend, secret string, tunnels uint, target string) (*Client, error) {
+	if err := validateTarget(target); err != nil {
+		return nil, err
+	}
+	client, err := NewClient(listen, backend, secret, tunnels)
+	if err != nil {
+		return nil, err
+	}
+	client.route = routingRequest{targetVersion, target}
 	return client, nil
 }

@@ -1,0 +1,12 @@
+listen: ":8001"
+secret: "replace-with-your-shared-secret"
+
+# 显式开启后，已认证 client 可用 -target 指定任意 server 可达的后端。
+# 默认关闭；修改此开关需要重启，SIGHUP 只追加 tag。
+allow_client_backend: false
+
+# 保存后向 server 进程发送 SIGHUP（kill -HUP <PID>），只加载新增 tag。
+# 修改或删除已有映射需要重启 server。
+routes:
+  A: "127.0.0.1:9001"
+  B: "127.0.0.1:9002"

@@ -19,16 +19,18 @@ type Service interface {
 	Status()      // Status prints the current status of the service.
 }
 
-// handleSignal sets up a signal handler to listen for SIGHUP.
-// On receiving SIGHUP, it prints the application status and the number of goroutines.
+// On receiving SIGHUP, handleSignal reloads YAML routes when supported, then
+// prints the application status and the number of goroutines.
 // On receiving any other signal, it logs the event and exits.
-func handleSignal(app Service) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT) // Listen for more common termination signals
-
+func handleSignal(app Service, sigChan <-chan os.Signal) {
 	for sig := range sigChan {
 		switch sig {
 		case syscall.SIGHUP:
+			if reloader, ok := app.(interface{ Reload() error }); ok {
+				if err := reloader.Reload(); err != nil {
+					tunnel.Error("config reload: %v; keeping current routes", err)
+				}
+			}
 			app.Status()
 			tunnel.Log("total goroutines: %d", runtime.NumGoroutine())
 		case syscall.SIGTERM, syscall.SIGINT: // Handle standard termination signals
@@ -54,6 +56,12 @@ func main() {
 	baddr := flag.String("backend", "127.0.0.1:1234", "Backend server address to connect to")
 	secret := flag.String("secret", "the answer to life, the universe and everything", "Shared secret for tunnel authentication")
 	tunnels := flag.Uint("tunnels", 0, "Number of low-level tunnels to create (0 for server mode)")
+	tag := flag.String("tag", "", "Route tag for this client (requires a tag-routing server)")
+	target := flag.String("target", "", "Backend host:port for the server to connect to (client mode, mutually exclusive with -tag)")
+	allowClientBackend := flag.Bool("allow-client-backend", false, "Allow authenticated clients to choose any backend host:port (server mode)")
+	config := flag.String("config", "", "Server YAML configuration (SIGHUP reloads new tags)")
+	var routes routeFlags
+	flag.Var(&routes, "route", "Server route TAG=host:port (repeat for multiple tags)")
 
 	// Bind flags directly to the global variables in the tunnel package
 	flag.IntVar(&tunnel.Heartbeat, "heartbeat", 10, "Tunnel heartbeat interval in seconds")
@@ -64,14 +72,28 @@ func main() {
 	flag.Usage = usage
 	// Parse command-line arguments
 	flag.Parse()
+	if err := validateModes(flag.CommandLine, *tunnels, *tag, *target, *config, *allowClientBackend, routes); err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid options: %v\n", err)
+		os.Exit(1)
+	}
 
 	var app Service
 	var err error
 
 	// Determine whether to start as a server or client based on the 'tunnels' flag.
-	if *tunnels == 0 {
+	if *config != "" {
+		app, err = tunnel.NewServerFromConfig(*config)
+	} else if *allowClientBackend {
+		app, err = tunnel.NewTargetServer(*laddr, *secret, routes)
+	} else if len(routes) > 0 {
+		app, err = tunnel.NewRoutingServer(*laddr, *secret, routes)
+	} else if *tunnels == 0 {
 		// Server mode: accepts incoming connections and forwards them to the backend.
 		app, err = tunnel.NewServer(*laddr, *baddr, *secret)
+	} else if *tag != "" {
+		app, err = tunnel.NewTaggedClient(*laddr, *baddr, *secret, *tunnels, *tag)
+	} else if *target != "" {
+		app, err = tunnel.NewTargetClient(*laddr, *baddr, *secret, *tunnels, *target)
 	} else {
 		// Client mode: connects to the server and creates persistent tunnels.
 		app, err = tunnel.NewClient(*laddr, *baddr, *secret, *tunnels)
@@ -83,8 +105,11 @@ func main() {
 		os.Exit(1) // Exit with error code
 	}
 
-	// Start the signal handler goroutine to manage OS signals.
-	go handleSignal(app)
+	// Register signals before entering the accept loop.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigChan)
+	go handleSignal(app, sigChan)
 
 	// Start the main application logic. This call blocks.
 	// The application's Start() method is expected to return an error when it stops.
