@@ -37,7 +37,7 @@ func validateModes(flags *flag.FlagSet, tunnels uint, tag, target, config string
 	explicit := make(map[string]bool)
 	flags.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 	if config != "" {
-		for _, name := range []string{"listen", "backend", "secret", "tunnels", "tag", "target", "route", "allow-client-backend"} {
+		for _, name := range []string{"listen", "backend", "secret", "tunnels", "tag", "target", "proxy", "route", "allow-client-backend"} {
 			if explicit[name] {
 				return fmt.Errorf("-config cannot be combined with -%s", name)
 			}
@@ -48,6 +48,9 @@ func validateModes(flags *flag.FlagSet, tunnels uint, tag, target, config string
 	}
 	if explicit["target"] && (target == "" || tunnels == 0) {
 		return fmt.Errorf("-target requires a nonempty backend host:port and client mode (-tunnels > 0)")
+	}
+	if explicit["proxy"] && tunnels == 0 {
+		return fmt.Errorf("-proxy requires client mode (-tunnels > 0)")
 	}
 	if tag != "" && target != "" {
 		return fmt.Errorf("-tag and -target are mutually exclusive")

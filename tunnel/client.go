@@ -107,11 +107,12 @@ func (hq *HubQueue) Pop() any {
 
 // Client manages multiple tunnel connections and listens for local connections to forward.
 type Client struct {
-	laddr   string         // Local address to listen for incoming connections
-	backend string         // Remote address of the tunnel server
-	secret  string         // Shared secret for authentication
-	tunnels uint           // Number of concurrent tunnel connections to maintain
-	route   routingRequest // Zero version selects the legacy single-backend protocol
+	dialBackend func(string) (net.Conn, error)
+	laddr       string         // Local address to listen for incoming connections
+	backend     string         // Remote address of the tunnel server
+	secret      string         // Shared secret for authentication
+	tunnels     uint           // Number of concurrent tunnel connections to maintain
+	route       routingRequest // Zero version selects the legacy single-backend protocol
 
 	alloc *IdAllocator // Allocator for unique link IDs
 	cq    HubQueue     // Concurrent queue (min-heap) of active hubs
@@ -122,7 +123,7 @@ type Client struct {
 // It performs the authentication handshake and returns a new HubItem.
 func (cli *Client) createHub() (hub *HubItem, err error) {
 	// Dial the backend server
-	conn, err := dial(cli.backend)
+	conn, err := cli.dialBackend(cli.backend)
 	if err != nil {
 		return nil, err
 	}
@@ -375,10 +376,11 @@ func (cli *Client) Status() {
 // It initializes the client structure and prepares the hub queue.
 func NewClient(listen, backend, secret string, tunnels uint) (*Client, error) {
 	client := &Client{
-		laddr:   listen,
-		backend: backend,
-		secret:  secret,
-		tunnels: tunnels,
+		dialBackend: dial,
+		laddr:       listen,
+		backend:     backend,
+		secret:      secret,
+		tunnels:     tunnels,
 
 		alloc: newAllocator(),                      // Initialize the ID allocator
 		cq:    make(HubQueue, tunnels)[:0:tunnels], // Initialize the hub queue slice with correct capacity and length
