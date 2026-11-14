@@ -34,6 +34,8 @@ client 指定由 server 访问的数据库地址：
 
 目标地址不要求在 client 启动时就可达；后端不可达时，对应业务连接关闭，持久隧道仍可用于之后的连接。
 
+client 可通过 `-proxy=http://host:port` 或 `-proxy=socks5://host:port` 连接 `-backend` 指定的 gotunnel server；`-target` 仍由 server 直接连接。环境变量和直连规则见 [Client 连接代理](../README.md#client-连接代理)。
+
 ## YAML 配置与 tag 混用
 
 也可以在 server 的 YAML 中开启：

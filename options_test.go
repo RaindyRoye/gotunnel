@@ -20,11 +20,14 @@ func TestRoutingOptions(t *testing.T) {
 		{"tag client", "./bin/gotunnel -listen=127.0.0.1:18080 -backend=127.0.0.1:8001 -tunnels=4 -tag=A -secret=example-secret", true},
 		{"target server", "./bin/gotunnel -listen=:8001 -allow-client-backend -secret=example-secret", true},
 		{"target client", "./bin/gotunnel -listen=127.0.0.1:18080 -backend=127.0.0.1:8001 -tunnels=4 -target=127.0.0.1:9001 -secret=example-secret", true},
+		{"target client with proxy", "./bin/gotunnel -tunnels=4 -target=127.0.0.1:9001 -proxy=socks5://127.0.0.1:1080", true},
 		{"YAML server", "./bin/gotunnel -config=examples/server.yaml", true},
 
-		// 只保留两种最容易混用的参数冲突。
+		// 容易混用的参数冲突。
 		{"config conflict", "./bin/gotunnel -config=examples/server.yaml -secret=override", false},
 		{"tag and target", "./bin/gotunnel -tunnels=4 -tag=A -target=127.0.0.1:9001", false},
+		{"server proxy", "./bin/gotunnel -proxy=http://127.0.0.1:7890", false},
+		{"config proxy", "./bin/gotunnel -config=examples/server.yaml -proxy=direct", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			flags := flag.NewFlagSet(tc.name, flag.ContinueOnError)
@@ -35,6 +38,7 @@ func TestRoutingOptions(t *testing.T) {
 			tunnels := flags.Uint("tunnels", 0, "")
 			tag := flags.String("tag", "", "")
 			target := flags.String("target", "", "")
+			flags.String("proxy", "", "")
 			allowClientBackend := flags.Bool("allow-client-backend", false, "")
 			config := flags.String("config", "", "")
 			var routes routeFlags

@@ -58,6 +58,7 @@ func main() {
 	tunnels := flag.Uint("tunnels", 0, "Number of low-level tunnels to create (0 for server mode)")
 	tag := flag.String("tag", "", "Route tag for this client (requires a tag-routing server)")
 	target := flag.String("target", "", "Backend host:port for the server to connect to (client mode, mutually exclusive with -tag)")
+	proxy := flag.String("proxy", "", "Client proxy: http://host:port, socks5://host:port, or direct (default: proxy environment variables)")
 	allowClientBackend := flag.Bool("allow-client-backend", false, "Allow authenticated clients to choose any backend host:port (server mode)")
 	config := flag.String("config", "", "Server YAML configuration (SIGHUP reloads new tags)")
 	var routes routeFlags
@@ -103,6 +104,12 @@ func main() {
 		// Log the error and exit if the application (server/client) creation fails.
 		fmt.Fprintf(os.Stderr, "Failed to create service: %s\n", err.Error())
 		os.Exit(1) // Exit with error code
+	}
+	if *tunnels > 0 {
+		if err := app.(*tunnel.Client).ConfigureProxy(*proxy); err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid proxy configuration: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Register signals before entering the accept loop.
