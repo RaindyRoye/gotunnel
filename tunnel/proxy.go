@@ -27,7 +27,7 @@ func (cli *Client) ConfigureProxy(value string) error {
 		value = firstEnv("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
 	}
 	if value == "" || (!fromEnvironment && value == "direct") {
-		cli.dialBackend = dial
+		cli.dialBackend = cli.dialDirect
 		return nil
 	}
 
@@ -50,14 +50,14 @@ func (cli *Client) ConfigureProxy(value string) error {
 			return fmt.Errorf("evaluate NO_PROXY: %w", err)
 		}
 		if selected == nil {
-			cli.dialBackend = dial
+			cli.dialBackend = cli.dialDirect
 			return nil
 		}
 	}
 
 	switch proxyURL.Scheme {
 	case "http":
-		cli.dialBackend = func(string) (net.Conn, error) {
+		cli.dialBackend = func() (net.Conn, error) {
 			return dialHTTPProxy(address, proxyURL.User, backend)
 		}
 	case "socks5", "socks5h":
@@ -68,7 +68,7 @@ func (cli *Client) ConfigureProxy(value string) error {
 			return fmt.Errorf("configure SOCKS5 proxy: %w", err)
 		}
 		contextDialer := dialer.(proxy.ContextDialer)
-		cli.dialBackend = func(string) (net.Conn, error) {
+		cli.dialBackend = func() (net.Conn, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), proxyDialTimeout)
 			defer cancel()
 			return contextDialer.DialContext(ctx, "tcp", backend)

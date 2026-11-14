@@ -107,7 +107,7 @@ func (hq *HubQueue) Pop() any {
 
 // Client manages multiple tunnel connections and listens for local connections to forward.
 type Client struct {
-	dialBackend func(string) (net.Conn, error)
+	dialBackend func() (net.Conn, error)
 	laddr       string         // Local address to listen for incoming connections
 	backend     string         // Remote address of the tunnel server
 	secret      string         // Shared secret for authentication
@@ -119,11 +119,15 @@ type Client struct {
 	lock  sync.Mutex   // Mutex protecting access to the hub queue
 }
 
+func (cli *Client) dialDirect() (net.Conn, error) {
+	return dial(cli.backend)
+}
+
 // createHub establishes a new tunnel connection to the backend server.
 // It performs the authentication handshake and returns a new HubItem.
 func (cli *Client) createHub() (hub *HubItem, err error) {
 	// Dial the backend server
-	conn, err := cli.dialBackend(cli.backend)
+	conn, err := cli.dialBackend()
 	if err != nil {
 		return nil, err
 	}
@@ -376,15 +380,15 @@ func (cli *Client) Status() {
 // It initializes the client structure and prepares the hub queue.
 func NewClient(listen, backend, secret string, tunnels uint) (*Client, error) {
 	client := &Client{
-		dialBackend: dial,
-		laddr:       listen,
-		backend:     backend,
-		secret:      secret,
-		tunnels:     tunnels,
+		laddr:   listen,
+		backend: backend,
+		secret:  secret,
+		tunnels: tunnels,
 
 		alloc: newAllocator(),                      // Initialize the ID allocator
 		cq:    make(HubQueue, tunnels)[:0:tunnels], // Initialize the hub queue slice with correct capacity and length
 	}
+	client.dialBackend = client.dialDirect
 	// Initialize the heap structure on the slice
 	heap.Init(&client.cq)
 
